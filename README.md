@@ -37,10 +37,23 @@ A 45-second cooldown and a minimum spacing between rotations prevent Cloudflare 
 - Windows 10/11 x64
 - [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (the .NET 8 SDK is enough to build)
 - Cloudflare WARP installed (`C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe`)
-- OpenCode CLI installed. If Launch OpenCode reports it missing, install it in any terminal with one of:
-  - `npm install -g opencode-ai` (Node.js/npm)
-  - `bun install -g opencode-ai` (Bun)
-  - `irm https://opencode.ai/install.ps1 | iex` (official installer)
+- OpenCode CLI installed. If Launch OpenCode reports it missing, install it with one of:
+  - `npm install -g opencode-ai` (needs Node.js)
+  - Without Node.js, paste this into PowerShell — it downloads the official Windows build into the folder the dashboard checks:
+
+    ```powershell
+    $ProgressPreference = 'SilentlyContinue'
+    $api = Invoke-RestMethod https://opencode.ai/update/api/latest/cli/opencode/
+    Invoke-WebRequest $api.metadata.files.'opencode-windows-x64.zip'.url -OutFile "$env:TEMP\opencode.zip"
+    Expand-Archive "$env:TEMP\opencode.zip" "$env:TEMP\opencode-cli" -Force
+    New-Item -ItemType Directory -Force "$env:USERPROFILE\.opencode\bin" | Out-Null
+    Get-ChildItem "$env:TEMP\opencode-cli" -Recurse -Filter opencode.exe |
+      Select-Object -First 1 |
+      Copy-Item -Destination "$env:USERPROFILE\.opencode\bin\"
+    & "$env:USERPROFILE\.opencode\bin\opencode.exe" --version
+    ```
+
+  There is no official PowerShell installer or Windows package-manager package (`install.ps1` on opencode.ai does not exist).
   
   The dashboard finds installs in the default npm, bun, scoop, winget, Chocolatey, and `%USERPROFILE%\.opencode\bin` locations even when they are not on its PATH; otherwise set the path under **Settings → OpenCode executable**.
 

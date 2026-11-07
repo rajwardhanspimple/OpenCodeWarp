@@ -207,12 +207,12 @@ public sealed class OpenCodeLauncher : IDisposable
             if (executable is null)
                 return new OpenCodeLaunchResult(false, 0, "",
                     "OpenCode CLI was not found.\n\n" +
-                    "Install it in any terminal with one of:\n" +
-                    "  npm install -g opencode-ai\n" +
-                    "  bun install -g opencode-ai\n" +
-                    "  irm https://opencode.ai/install.ps1 | iex\n\n" +
-                    "Then click Launch OpenCode again. If it is installed in a custom location, " +
-                    "set the path under Settings > OpenCode executable.");
+                    "Install it with npm (needs Node.js):\n" +
+                    "  npm install -g opencode-ai\n\n" +
+                    "Or without Node.js, download opencode-windows-x64.zip from\n" +
+                    "  https://opencode.ai/update/api/latest/cli/opencode/\n" +
+                    "and copy opencode.exe into %USERPROFILE%\\.opencode\\bin\\.\n\n" +
+                    "Then click Launch OpenCode again, or set the exact path in Settings.");
 
             try
             {
