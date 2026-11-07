@@ -135,15 +135,27 @@ public sealed class OpenCodeLauncher : IDisposable
             candidates.Add(_settings.OpenCodeExe!);
 
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        // npm global installs put their shims directly in the prefix (default %APPDATA%\npm),
+        // which a GUI process may not have on PATH even when a terminal does.
+        candidates.Add(Path.Combine(appData, "npm", "opencode.cmd"));
+        candidates.Add(Path.Combine(appData, "npm", "opencode.exe"));
+        candidates.Add(Path.Combine(appData, "npm", "node_modules", "opencode-ai", "bin", "opencode.exe"));
+        candidates.Add(Path.Combine(appData, "npm", "node_modules", "opencode-ai", "bin", "opencode.cmd"));
         candidates.Add(Path.Combine(appData, "npm", "node_modules", "@opencode", "cli", "bin", "opencode.exe"));
         candidates.Add(Path.Combine(appData, "npm", "node_modules", "@opencode", "cli", "bin", "opencode.cmd"));
 
         var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         candidates.Add(Path.Combine(localAppData, "Programs", "opencode", "opencode.exe"));
         candidates.Add(Path.Combine(localAppData, "opencode", "bin", "opencode.exe"));
+        candidates.Add(Path.Combine(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe"));
 
         var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         candidates.Add(Path.Combine(profile, ".opencode", "bin", "opencode.exe"));
+        candidates.Add(Path.Combine(profile, ".bun", "bin", "opencode.exe"));
+        candidates.Add(Path.Combine(profile, "scoop", "shims", "opencode.exe"));
+
+        var commonAppData = Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData);
+        candidates.Add(Path.Combine(commonAppData, "chocolatey", "bin", "opencode.exe"));
 
         var path = Environment.GetEnvironmentVariable("PATH") ?? "";
         foreach (var part in path.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
@@ -152,6 +164,7 @@ public sealed class OpenCodeLauncher : IDisposable
             {
                 candidates.Add(Path.Combine(part, "opencode.exe"));
                 candidates.Add(Path.Combine(part, "opencode.cmd"));
+                candidates.Add(Path.Combine(part, "opencode.bat"));
             }
             catch { }
         }
@@ -192,7 +205,14 @@ public sealed class OpenCodeLauncher : IDisposable
 
             var executable = DiscoverExecutable();
             if (executable is null)
-                return new OpenCodeLaunchResult(false, 0, "", "OpenCode CLI was not found. Install it or set the path in settings.");
+                return new OpenCodeLaunchResult(false, 0, "",
+                    "OpenCode CLI was not found.\n\n" +
+                    "Install it in any terminal with one of:\n" +
+                    "  npm install -g opencode-ai\n" +
+                    "  bun install -g opencode-ai\n" +
+                    "  irm https://opencode.ai/install.ps1 | iex\n\n" +
+                    "Then click Launch OpenCode again. If it is installed in a custom location, " +
+                    "set the path under Settings > OpenCode executable.");
 
             try
             {

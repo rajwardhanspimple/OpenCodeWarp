@@ -37,7 +37,12 @@ A 45-second cooldown and a minimum spacing between rotations prevent Cloudflare 
 - Windows 10/11 x64
 - [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0) (the .NET 8 SDK is enough to build)
 - Cloudflare WARP installed (`C:\Program Files\Cloudflare\Cloudflare WARP\warp-cli.exe`)
-- OpenCode CLI installed (`opencode.exe` or `opencode.cmd` on `PATH`, or set its path in Settings)
+- OpenCode CLI installed. If Launch OpenCode reports it missing, install it in any terminal with one of:
+  - `npm install -g opencode-ai` (Node.js/npm)
+  - `bun install -g opencode-ai` (Bun)
+  - `irm https://opencode.ai/install.ps1 | iex` (official installer)
+  
+  The dashboard finds installs in the default npm, bun, scoop, winget, Chocolatey, and `%USERPROFILE%\.opencode\bin` locations even when they are not on its PATH; otherwise set the path under **Settings → OpenCode executable**.
 
 The app does not need to be run as Administrator. WARP proxy mode is user-level.
 
