@@ -709,9 +709,12 @@ internal sealed class MainForm : Form
         {
             if (result.Success)
             {
+                var verified = _controller.LastRelayVerified == true
+                    ? " Verified: OpenCode is using the new IP."
+                    : " Warning: the relay has not confirmed the new IP yet.";
                 Balloon("WARP IP rotated",
-                    $"{ShortIp(result.OldIp)} → {ShortIp(result.NewIp)} ({result.Colo}). OpenCode was not restarted.",
-                    ToolTipIcon.Info);
+                    $"{ShortIp(result.OldIp)} → {ShortIp(result.NewIp)} ({result.Colo}). OpenCode was not restarted.{verified}",
+                    _controller.LastRelayVerified == true ? ToolTipIcon.Info : ToolTipIcon.Warning);
             }
             else
             {

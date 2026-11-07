@@ -31,6 +31,13 @@ public sealed class AppSettings
     public string ProjectFolder { get; set; } = AppPaths.DefaultWorkspace;
 
     public bool RotateOnRateLimit { get; set; }
+
+    /// <summary>Rotate WARP when OpenCode's log reports the free usage limit.</summary>
+    public bool RotateOnUsageLimit { get; set; } = true;
+
+    /// <summary>Scheduled rotation interval in minutes; 0 disables the timer.</summary>
+    public int AutoRotateMinutes { get; set; } = 30;
+
     public bool AutoLaunchOpenCode { get; set; }
 
     public bool MinimizeToTray { get; set; } = true;
@@ -120,6 +127,7 @@ public sealed class AppSettings
         RelayPort = Clamp(RelayPort, 1024, 65535, 41000);
         WarpProxyPort = Clamp(WarpProxyPort, 1, 65535, 40000);
         MinSecondsBetweenRotations = Clamp(MinSecondsBetweenRotations, 20, 600, 25);
+        AutoRotateMinutes = Clamp(AutoRotateMinutes, 0, 720, 30);
         RotationAttempts = Clamp(RotationAttempts, 1, 10, 3);
         WarpWaitSeconds = Clamp(WarpWaitSeconds, 5, 180, 30);
         HealthCheckSeconds = Clamp(HealthCheckSeconds, 5, 300, 25);

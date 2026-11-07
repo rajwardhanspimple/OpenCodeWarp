@@ -19,7 +19,8 @@ public sealed record QuotaHit(
 /// <summary>
 /// Tails OpenCode's newest log file for quota, rate-limit, and transport errors.
 /// It never stops or restarts OpenCode. Transport resets request a WARP reconnect;
-/// account quota errors do not trigger model changes or IP rotation.
+/// usage-limit and rate-limit hits request a WARP IP rotation when the matching
+/// rotate-on setting is enabled.
 /// </summary>
 public sealed partial class QuotaWatcher : IAsyncDisposable
 {

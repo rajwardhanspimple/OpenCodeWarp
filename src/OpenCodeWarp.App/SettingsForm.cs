@@ -13,6 +13,8 @@ internal sealed class SettingsForm : Form
     private TextBox _argsBox = null!;
     private CheckBox _autoLaunch = null!;
     private CheckBox _rateRotate = null!;
+    private CheckBox _usageRotate = null!;
+    private TextBox _autoRotateMinutes = null!;
     private TextBox _relayPort = null!;
     private TextBox _warpPort = null!;
     private TextBox _attempts = null!;
@@ -198,6 +200,7 @@ internal sealed class SettingsForm : Form
 
         _autoLaunch = Check("Launch OpenCode automatically when the relay starts", _draft.AutoLaunchOpenCode);
         _rateRotate = Check("Rotate on HTTP 429 / rate-limit errors", _draft.RotateOnRateLimit);
+        _usageRotate = Check("Rotate on free usage limit errors", _draft.RotateOnUsageLimit);
 
         var hint = Hint(
             "Leave the executable empty to auto-detect the installed OpenCode CLI. Only OpenCode's process tree " +
@@ -210,6 +213,7 @@ internal sealed class SettingsForm : Form
         AddField(body, "Extra OpenCode arguments  (optional)", _argsBox);
         AddFull(body, hint);
         AddFull(body, _autoLaunch);
+        AddFull(body, _usageRotate);
         AddFull(body, _rateRotate);
 
         return Section(
@@ -226,10 +230,15 @@ internal sealed class SettingsForm : Form
         _minSeconds = NumberInput(_draft.MinSecondsBetweenRotations);
         _waitSeconds = NumberInput(_draft.WarpWaitSeconds);
         _healthSeconds = NumberInput(_draft.HealthCheckSeconds);
+        _autoRotateMinutes = NumberInput(_draft.AutoRotateMinutes);
 
         var portsHint = Hint(
             "The relay is the stable local endpoint used by OpenCode. Port changes take effect after the app restarts. " +
             "Cloudflare throttles registrations, so the minimum spacing is 20 seconds.");
+
+        var autoRotateHint = Hint(
+            "0 disables the timer. After every rotation the app checks through the relay that the new IP is really in use.");
+        autoRotateHint.MaximumSize = new Size(380, 0);
 
         var body = NewBody();
         AddPair(body,
@@ -241,6 +250,9 @@ internal sealed class SettingsForm : Form
         AddPair(body,
             Labeled("Seconds to wait for a new WARP IP", _waitSeconds),
             Labeled("Health-check interval (seconds)", _healthSeconds));
+        AddPair(body,
+            Labeled("Auto-rotate WARP every (minutes, 0 = off)", _autoRotateMinutes),
+            autoRotateHint);
         AddFull(body, portsHint);
 
         return Section("Ports and timing", "Defaults are tuned for a fast rotation without rate limiting.", body);
@@ -404,6 +416,7 @@ internal sealed class SettingsForm : Form
         var minSeconds = ReadNumber(_minSeconds, "Minimum seconds between rotations", 20, 600);
         var waitSeconds = ReadNumber(_waitSeconds, "Seconds to wait for a new WARP IP", 5, 180);
         var healthSeconds = ReadNumber(_healthSeconds, "Health-check interval", 5, 300);
+        var autoRotate = ReadNumber(_autoRotateMinutes, "Auto-rotate minutes", 0, 720);
 
         if (errors.Count > 0)
         {
@@ -423,6 +436,8 @@ internal sealed class SettingsForm : Form
         _draft.OpenCodeExtraArgs = _argsBox.Text.Trim();
         _draft.AutoLaunchOpenCode = _autoLaunch.Checked;
         _draft.RotateOnRateLimit = _rateRotate.Checked;
+        _draft.RotateOnUsageLimit = _usageRotate.Checked;
+        _draft.AutoRotateMinutes = autoRotate;
         _draft.RelayPort = relayPort;
         _draft.WarpProxyPort = warpPort;
         _draft.RotationAttempts = attempts;

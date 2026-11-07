@@ -6,6 +6,8 @@ public sealed class AppController : IAsyncDisposable
     private readonly CancellationTokenSource _lifetime = new();
     private readonly object _failureLock = new();
     private Task? _healthLoop;
+    private Task? _autoRotateLoop;
+    private DateTimeOffset _lastRotationUtc = DateTimeOffset.MinValue;
     private bool _started;
     private bool _disposed;
     private int _recoveryRunning;
@@ -30,6 +32,12 @@ public sealed class AppController : IAsyncDisposable
     public DateTime? LastRotationAt { get; private set; }
     public WarpTrace? LastTrace { get; private set; }
     public WarpTrace? LastRelayTrace { get; private set; }
+
+    /// <summary>
+    /// True once the relay proved that its traffic exits through the current WARP IP;
+    /// false when the last check could not confirm it; null before the first check.
+    /// </summary>
+    public bool? LastRelayVerified { get; private set; }
     public string? LastError { get; private set; }
     public bool WarpOnline => LastTrace?.WarpOn == true;
     public bool OpenCodeRunning => OpenCode.IsRunning;
@@ -70,12 +78,13 @@ public sealed class AppController : IAsyncDisposable
 
         await Relay.StartAsync(cancellationToken);
         _started = true;
+        _lastRotationUtc = DateTimeOffset.Now;
 
         var ready = await Warp.EnsureReadyAsync(cancellationToken);
         ApplyReady(ready);
         if (ready.Success)
         {
-            try { await TestRelayAsync(cancellationToken); }
+            try { await VerifyRelayExitIpAsync(ready.Trace?.Ip ?? "", cancellationToken); }
             catch (Exception ex) { Log.Warn($"End-to-end relay check failed: {ex.Message}"); }
         }
         else
@@ -86,6 +95,7 @@ public sealed class AppController : IAsyncDisposable
 
         Watcher.Start();
         _healthLoop = Task.Run(() => HealthLoopAsync(_lifetime.Token));
+        _autoRotateLoop = Task.Run(() => AutoRotateLoopAsync(_lifetime.Token));
 
         if (Settings.AutoLaunchOpenCode)
         {
@@ -173,11 +183,13 @@ public sealed class AppController : IAsyncDisposable
         {
             IsRotating = true;
             LastError = null;
+            LastRelayVerified = null;
             Relay.PauseWarp("rotation");
             RaiseStateChanged();
             Log.Warn($"Rotation requested: {reason}. OpenCode will stay open; new AI connections wait for the tunnel.");
 
             var result = await Warp.RotateAsync(reason, force, cancellationToken);
+            _lastRotationUtc = DateTimeOffset.UtcNow;
             if (result.Success)
             {
                 LastTrace = result.LastTrace;
@@ -215,8 +227,8 @@ public sealed class AppController : IAsyncDisposable
 
             if (result.Success)
             {
-                try { await TestRelayAsync(cancellationToken); }
-                catch (Exception ex) { Log.Debug("Relay check after rotation: " + ex.Message); }
+                try { await VerifyRelayExitIpAsync(result.NewIp, cancellationToken); }
+                catch (Exception ex) { Log.Warn("Relay verification after rotation failed: " + ex.Message); }
             }
 
             RotationFinished?.Invoke(result);
@@ -240,7 +252,16 @@ public sealed class AppController : IAsyncDisposable
 
         if (hit.Kind == QuotaKind.UsageLimit)
         {
-            Log.Warn("Free usage limit detected. No model switch or IP rotation was attempted; " +
+            if (Settings.RotateOnUsageLimit)
+            {
+                Log.Warn("Free usage limit detected; rotating WARP so OpenCode gets a fresh exit IP. " +
+                         "OpenCode stays open. If the provider enforces the limit on the account, " +
+                         "the new IP will not restore access on its own.");
+                await RotateAsync("free usage limit", false, _lifetime.Token);
+                return;
+            }
+
+            Log.Warn("Free usage limit detected. Rotate-on-usage-limit is off, so no IP rotation was attempted; " +
                      "the provider may require its account quota to reset.");
             return;
         }
@@ -313,7 +334,7 @@ public sealed class AppController : IAsyncDisposable
 
                     if (ready.Success)
                     {
-                        try { await TestRelayAsync(_lifetime.Token); }
+                        try { await VerifyRelayExitIpAsync(ready.Trace?.Ip ?? "", _lifetime.Token); }
                         catch (Exception ex) { Log.Debug("Relay check after tunnel repair: " + ex.Message); }
                     }
                 }
@@ -376,6 +397,85 @@ public sealed class AppController : IAsyncDisposable
             Log.Warn($"Relay end-to-end check did not report warp=on: {trace.Error ?? "warp=" + trace.Warp}");
         RaiseStateChanged();
         return trace;
+    }
+
+    /// <summary>
+    /// Proves that traffic sent through the relay really exits via the expected WARP IP —
+    /// not just that the WARP proxy itself reports a new IP. Stale tunnels are closed
+    /// between attempts so a retry re-dials through the fresh registration.
+    /// </summary>
+    public async Task<bool> VerifyRelayExitIpAsync(string expectedIp, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(expectedIp))
+        {
+            Log.Warn("Relay exit verification skipped: the current WARP exit IP is unknown.");
+            LastRelayVerified = null;
+            RaiseStateChanged();
+            return false;
+        }
+
+        const int attempts = 3;
+        for (var attempt = 1; attempt <= attempts; attempt++)
+        {
+            var trace = await TestRelayAsync(cancellationToken);
+            if (trace.Ok && TraceProbe.SameExit(trace.Ip, expectedIp))
+            {
+                LastRelayVerified = true;
+                Log.Info($"Verified: the relay's traffic now exits via {trace.Ip} ({trace.Colo}) — " +
+                         "the new WARP IP is actually in use.");
+                RaiseStateChanged();
+                return true;
+            }
+
+            if (attempt < attempts)
+            {
+                Log.Warn($"Relay check {attempt}/{attempts}: traffic through the relay exits via " +
+                         $"{(trace.Ip.Length > 0 ? trace.Ip : "an unknown IP")} but the WARP IP is {expectedIp}; " +
+                         "closing stale tunnels and retrying.");
+                Relay.ResetWarpConnections();
+                await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
+            }
+        }
+
+        LastRelayVerified = false;
+        LastError = $"The relay did not confirm that the WARP IP {expectedIp} is being used.";
+        Log.Warn("Relay verification failed: OpenCode traffic may still leave through the previous exit. " +
+                 "The next rotation, tunnel repair, or health check will retry.");
+        RaiseStateChanged();
+        return false;
+    }
+
+    /// <summary>
+    /// Rotates WARP on a fixed interval so the exit IP keeps changing even when
+    /// OpenCode's log never shows a quota or rate-limit error. 0 disables the timer.
+    /// </summary>
+    private async Task AutoRotateLoopAsync(CancellationToken cancellationToken)
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(15), cancellationToken);
+                var minutes = Settings.AutoRotateMinutes;
+                if (minutes <= 0 || IsRotating || IsRecovering || !Relay.IsRunning || !Warp.Available)
+                    continue;
+
+                var due = _lastRotationUtc.AddMinutes(minutes);
+                if (DateTimeOffset.Now < due)
+                    continue;
+
+                Log.Info($"Auto-rotation is due (interval: {minutes} min).");
+                await RotateAsync($"scheduled auto-rotation (every {minutes} minutes)", force: false, cancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log.Warn("Auto-rotation loop error: " + ex.Message);
+            }
+        }
     }
 
     public void RefreshHosts()

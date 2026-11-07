@@ -11,12 +11,12 @@ The app is self-contained in `D:\OpenCodeWarp`. It does not modify OpenCode's in
 - **WARP is applied to OpenCode only.** The relay listens on `127.0.0.1:41000`; only the OpenCode process tree receives `HTTP_PROXY` / `HTTPS_PROXY` pointing at it. Windows, browsers, and other apps stay direct.
 - **Search and web fetch keep working.** In the default **AI-only** scope, model/provider hosts use WARP while search hosts (`mcp.exa.ai`, Exa, Firecrawl, Tavily, DuckDuckGo, Google, Bing, Brave) and ordinary web pages stay direct.
 - **OpenCode is not killed or restarted on a connection reset.** The watcher detects `ECONNRESET`, reconnects WARP, and probes the OpenCode endpoint. It does not switch models.
-- **Usage limits do not trigger IP rotation.** The provider may enforce its quota on the account, so changing IPs may not restore access.
+- **Usage limits trigger a WARP IP rotation by default.** The dashboard rotates to a fresh exit IP when OpenCode reports the free usage limit (turn this off in Settings if your provider enforces the quota on the account).
 - **One stable proxy endpoint.** OpenCode always uses `http://127.0.0.1:41000`. WARP's real proxy port (`127.0.0.1:40000`) changes underneath, so OpenCode never needs a new environment or a restart.
 
 ## How rotation and recovery work
 
-1. A rotation starts from **Rotate WARP now** (or optionally on HTTP 429). Connection resets trigger a WARP reconnect and endpoint probe, without replacing the registration.
+1. A rotation starts from **Rotate WARP now**, from a detected **free usage limit** or **HTTP 429** (each optional in Settings), or from the **auto-rotate timer** (default every 30 minutes). Connection resets trigger a WARP reconnect and endpoint probe, without replacing the registration.
 2. The relay **closes its WARP gate**; new AI connections wait instead of hitting a half-replaced tunnel.
 3. `warp-cli disconnect`
 4. `warp-cli registration delete`
@@ -25,7 +25,8 @@ The app is self-contained in `D:\OpenCodeWarp`. It does not modify OpenCode's in
 7. `warp-cli connect`
 8. Poll `https://www.cloudflare.com/cdn-cgi/trace` until it reports `warp=on` with a **different exit IP**.
 9. Close stale WARP tunnels and open the gate. Waiting AI connections continue through the new tunnel. Do **not** touch the OpenCode process.
-10. If a WARP CONNECT returns 502/503/504, the relay retries three times with a short backoff. Two failed destinations within 30 seconds trigger an automatic WARP reconnect.
+10. **Verify the new IP is really used.** After every rotation (and at startup and after tunnel repairs) the app fetches `opencode.ai/cdn-cgi/trace` *through the relay* and compares the exit IP with the new WARP IP. It retries up to three times, closing stale tunnels between attempts, and logs `Verified: the relay's traffic now exits via <IP>` — or a warning if the new IP is not confirmed.
+11. If a WARP CONNECT returns 502/503/504, the relay retries three times with a short backoff. Two failed destinations within 30 seconds trigger an automatic WARP reconnect.
 
 A 45-second cooldown and a minimum spacing between rotations prevent Cloudflare registration throttling.
 
@@ -63,7 +64,7 @@ Start the dashboard by double-clicking `run.cmd` or `dist\OpenCodeWarp.exe`.
 2. Click **Launch OpenCode**. A hidden private server starts with a generated password, and OpenCode opens in its own console attached to that server. Both use the relay proxy environment.
 3. Optionally enable **Launch OpenCode automatically when the relay starts** and **Start with Windows**.
 
-> The app does not rotate IPs on account usage limits. If the provider rejects requests because the account quota is exhausted, wait for its reset.
+> Rotation is automatic by default: the dashboard rotates WARP when OpenCode's log reports the **free usage limit**, and on a fixed schedule (**Auto-rotate WARP**, every 30 minutes by default, `0` disables the timer). Both can be turned off in Settings. If the provider enforces the limit on the account itself, a new exit IP will not restore access on its own — wait for the quota reset in that case.
 
 > **Important:** launch OpenCode from this dashboard. If you start OpenCode from another terminal, it will not have the proxy environment and the app cannot inject one into an already-running process. The app will still watch the log and rotate WARP, but that instance will not be using the relay.
 
@@ -91,7 +92,9 @@ Stored at `%LOCALAPPDATA%\OpenCodeWarp\settings.json`.
 | Scope | `AiOnly` | AI hosts through WARP; search/fetch direct. `All` sends everything except the direct list through WARP. |
 | Relay port | `41000` | Stable loopback proxy used by OpenCode. |
 | WARP proxy port | `40000` | Local WARP proxy port. |
+| Rotate on usage limit | on | Rotate WARP when the log reports the free usage limit. |
 | Rotate on rate limit | off | Also rotate on HTTP 429 / rate-limit errors. |
+| Auto-rotate WARP every | `30` | Minutes between scheduled rotations; `0` disables the timer. |
 | Auto-launch OpenCode | off | Start OpenCode when the relay starts. |
 | Start with Windows | off | HKCU Run entry; starts minimized to the tray. |
 | Minimum seconds between rotations | 25 | Cloudflare throttling guard. |
