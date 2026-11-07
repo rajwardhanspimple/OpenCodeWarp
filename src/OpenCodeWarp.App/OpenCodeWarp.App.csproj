@@ -1,0 +1,23 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\OpenCodeWarp.Core\OpenCodeWarp.Core.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <AssemblyName>OpenCodeWarp</AssemblyName>
+    <RootNamespace>OpenCodeWarp.App</RootNamespace>
+    <Product>OpenCode Warp</Product>
+    <AssemblyTitle>OpenCode Warp</AssemblyTitle>
+    <Description>WARP-only IP rotation for OpenCode, without restarting the TUI.</Description>
+    <Version>1.0.0</Version>
+    <FileVersion>1.0.0.0</FileVersion>
+    <ApplicationIcon>app.ico</ApplicationIcon>
+  </PropertyGroup>
+
+</Project>
