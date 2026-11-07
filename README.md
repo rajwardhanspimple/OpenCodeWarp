@@ -2,7 +2,7 @@
 
 A fast Windows dashboard and loopback relay that gives **OpenCode a rotating WARP exit IP** without routing the rest of the computer through WARP and **without restarting OpenCode when the free usage limit is hit**.
 
-The app is self-contained in `D:\OpenCodeWarp`. It does not modify OpenCode's installation.
+The app is self-contained in its own folder. It does not modify OpenCode's installation.
 
 ---
 
@@ -43,17 +43,33 @@ The app does not need to be run as Administrator. WARP proxy mode is user-level.
 
 ## Build and run
 
-```powershell
-cd D:\OpenCodeWarp
-powershell -ExecutionPolicy Bypass -File build.ps1
+Get the code first — clone it with git, or use **Code → Download ZIP** on GitHub and extract it:
+
 ```
+git clone https://github.com/rajwardhanspimple/OpenCodeWarp.git
+cd OpenCodeWarp
+```
+
+Then build **from inside that folder** (the one that contains `build.ps1`):
+
+```powershell
+.\build.cmd
+```
+
+or equivalently:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
+```
+
+> The `-File ... does not exist` error means the command was run from a different folder. `cd` into the repo folder first, or just double-click `build.cmd` — it always finds its own folder.
 
 That produces:
 
 - `dist\OpenCodeWarp.exe` — the Windows dashboard
 - `dist\ocwarp.exe` — headless diagnostics / relay
 
-Start the dashboard by double-clicking `run.cmd` or `dist\OpenCodeWarp.exe`.
+Start the dashboard by double-clicking `run.cmd` or `dist\OpenCodeWarp.exe` from the same folder you built in.
 
 ### First run
 
