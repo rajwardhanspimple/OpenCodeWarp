@@ -134,6 +134,12 @@ public sealed class OpenCodeLauncher : IDisposable
         if (!string.IsNullOrWhiteSpace(_settings.OpenCodeExe))
             candidates.Add(_settings.OpenCodeExe!);
 
+        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        // The official installer and this project's documented zip method both place a
+        // real executable here; prefer it over package-manager shims, which npm 12+ can
+        // leave broken when it skips postinstall scripts (allowScripts).
+        candidates.Add(Path.Combine(profile, ".opencode", "bin", "opencode.exe"));
+
         var appData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
         // npm global installs put their shims directly in the prefix (default %APPDATA%\npm),
         // which a GUI process may not have on PATH even when a terminal does.
@@ -149,8 +155,6 @@ public sealed class OpenCodeLauncher : IDisposable
         candidates.Add(Path.Combine(localAppData, "opencode", "bin", "opencode.exe"));
         candidates.Add(Path.Combine(localAppData, "Microsoft", "WinGet", "Links", "opencode.exe"));
 
-        var profile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        candidates.Add(Path.Combine(profile, ".opencode", "bin", "opencode.exe"));
         candidates.Add(Path.Combine(profile, ".bun", "bin", "opencode.exe"));
         candidates.Add(Path.Combine(profile, "scoop", "shims", "opencode.exe"));
 
