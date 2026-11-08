@@ -30,9 +30,12 @@ internal static class Program
         Application.ThreadException += (_, e) => ReportCrash(e.Exception);
         AppDomain.CurrentDomain.UnhandledException += (_, e) => ReportCrash(e.ExceptionObject as Exception);
 
-        var startMinimized = args.Any(arg =>
-            arg.Equals("--minimized", StringComparison.OrdinalIgnoreCase)
-            || arg.Equals("--tray", StringComparison.OrdinalIgnoreCase));
+        // "Start minimized" in Settings and the --minimized/--tray flags (used by the
+        // Start-with-Windows entry) both lead to a tray launch.
+        var startMinimized = AppSettings.Load().StartMinimized
+            || args.Any(arg =>
+                arg.Equals("--minimized", StringComparison.OrdinalIgnoreCase)
+                || arg.Equals("--tray", StringComparison.OrdinalIgnoreCase));
 
         Application.Run(new MainForm(startMinimized));
     }

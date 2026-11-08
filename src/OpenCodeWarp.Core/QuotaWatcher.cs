@@ -72,7 +72,6 @@ public sealed partial class QuotaWatcher : IAsyncDisposable
     private DateTimeOffset _pendingAt;
     private DateTimeOffset _lastHit = DateTimeOffset.MinValue;
     private volatile bool _handling;
-    private bool _firstFile = true;
 
     public QuotaWatcher(AppSettings settings, AppLog log, Func<QuotaHit, Task> onHit)
     {
@@ -131,18 +130,12 @@ public sealed partial class QuotaWatcher : IAsyncDisposable
                     _currentFile = newest;
                     _partial = "";
                     _decoder = Encoding.UTF8.GetDecoder();
-                    if (_firstFile)
-                    {
-                        // Do not replay yesterday's quota error when the app starts.
-                        _offset = SafeLength(newest);
-                        _firstFile = false;
-                        _log.Info($"Quota watcher is following {newest} from the end.");
-                    }
-                    else
-                    {
-                        _offset = 0;
-                        _log.Info($"Quota watcher switched to new log {newest}.");
-                    }
+                    // Always start at the end of a newly selected file. OpenCode rotates
+                    // between several logs (opencode.log, ecc-hooks.log, ...); reading a
+                    // newly selected file from byte 0 replays old quota errors as fresh
+                    // detections and caused extra rotations.
+                    _offset = SafeLength(newest);
+                    _log.Info($"Quota watcher is following {newest} from the end.");
                 }
 
                 var length = SafeLength(newest);

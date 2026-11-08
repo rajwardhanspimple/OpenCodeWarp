@@ -15,6 +15,7 @@ public sealed class AppController : IAsyncDisposable
     private bool _disposed;
     private int _recoveryRunning;
     private int _tunnelFailureCount;
+    private int _confirmInFlight;
     private DateTimeOffset _tunnelFailureWindow = DateTimeOffset.MinValue;
     private DateTimeOffset _lastProbeBurnedAt = DateTimeOffset.MinValue;
 
@@ -51,6 +52,9 @@ public sealed class AppController : IAsyncDisposable
     public bool OpenCodeRunning => OpenCode.IsRunning;
 
     public string ProxyUrl => $"http://127.0.0.1:{Relay.BoundPort}";
+
+    /// <summary>The local WARP proxy endpoint, read live so port changes apply immediately.</summary>
+    public string WarpProxyUrl => $"http://127.0.0.1:{Settings.WarpProxyPort}";
 
     public event Action? StateChanged;
     public event Action<QuotaHit>? QuotaDetected;
@@ -101,8 +105,8 @@ public sealed class AppController : IAsyncDisposable
         ApplyReady(ready);
         if (ready.Success)
         {
-            try { await VerifyRelayExitIpAsync(ready.Trace?.Ip ?? "", cancellationToken); }
-            catch (Exception ex) { Log.Warn($"End-to-end relay check failed: {ex.Message}"); }
+            try { await VerifyWarpExitIpAsync(ready.Trace?.Ip ?? "", cancellationToken); }
+            catch (Exception ex) { Log.Warn($"End-to-end tunnel check failed: {ex.Message}"); }
         }
         else
         {
@@ -144,6 +148,21 @@ public sealed class AppController : IAsyncDisposable
         if (OpenCode.IsRunning)
             return new OpenCodeLaunchResult(true, OpenCode.ProcessId ?? 0, OpenCode.LastExecutable ?? "", "OpenCode is already running.");
 
+        // Serialize against rotations: launching the TUI into a mid-rotation relay
+        // would start it against a paused (or about-to-change) tunnel.
+        await _rotationGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await LaunchOpenCodeCoreAsync(cancellationToken);
+        }
+        finally
+        {
+            _rotationGate.Release();
+        }
+    }
+
+    private async Task<OpenCodeLaunchResult> LaunchOpenCodeCoreAsync(CancellationToken cancellationToken)
+    {
         if (!Relay.IsRunning)
             await Relay.StartAsync(cancellationToken);
 
@@ -249,15 +268,17 @@ public sealed class AppController : IAsyncDisposable
                 Log.Info($"New exit IP {result.NewIp} is live; closed {openTunnels} stale WARP tunnel(s). " +
                          "OpenCode was not restarted.");
 
-                // Let the verification and the probe send traffic through the new tunnel.
-                Relay.ResumeWarp();
-
-                try { await VerifyRelayExitIpAsync(result.NewIp, cancellationToken); }
-                catch (Exception ex) { Log.Warn("Relay verification after rotation failed: " + ex.Message); }
+                // The WARP gate stays closed for the whole rotation: waiting AI connections
+                // are only released after the new IP has passed verification AND the
+                // usability probe, so nothing flows through an unproven (possibly burned)
+                // exit. Both checks dial the WARP proxy directly, which the gate does not
+                // block.
+                try { await VerifyWarpExitIpAsync(result.NewIp, cancellationToken); }
+                catch (Exception ex) { Log.Warn("Exit IP verification after rotation failed: " + ex.Message); }
 
                 Log.Info($"Usability probe: asking {OpenCodeUsabilityProbe.ProbeModel} through the new IP " +
                          "via the OpenCode CLI...");
-                var probe = await Probe.ProbeAsync(ProxyUrl, cancellationToken);
+                var probe = await Probe.ProbeAsync(WarpProxyUrl, cancellationToken);
                 LastProbe = probe;
                 if (!probe.Usable && probe.RotateAgain)
                     _lastProbeBurnedAt = DateTimeOffset.Now;
@@ -285,10 +306,9 @@ public sealed class AppController : IAsyncDisposable
                     break;
                 }
 
-                Log.Warn($"Usability probe FAILED: {probe.Detail} The IP looks burned; blocking new AI " +
-                         $"connections and rotating again (round {round + 1}/{rounds}).");
+                Log.Warn($"Usability probe FAILED: {probe.Detail} The IP looks burned; the WARP gate stays " +
+                         $"closed and the app rotates again (round {round + 1}/{rounds}).");
                 LastError = $"The new IP was burned ({probe.Detail}); rotating again.";
-                Relay.PauseWarp("burned IP");
                 RaiseStateChanged();
             }
 
@@ -296,8 +316,14 @@ public sealed class AppController : IAsyncDisposable
             // the provider's own errors rather than wait forever for a healthy tunnel.
             Relay.ResumeWarp();
 
-            RotationFinished?.Invoke(result!);
-            return result!;
+            if (result!.Success)
+            {
+                try { await TestRelayAsync(cancellationToken); }
+                catch (Exception ex) { Log.Debug("Relay check after rotation: " + ex.Message); }
+            }
+
+            RotationFinished?.Invoke(result);
+            return result;
         }
         finally
         {
@@ -368,13 +394,21 @@ public sealed class AppController : IAsyncDisposable
 
     /// <summary>
     /// Asks the UI whether an automatic IP change is allowed. Without a UI handler
-    /// (headless CLI) the change proceeds.
+    /// (headless CLI) the change proceeds. Only one confirmation may be open at a
+    /// time: a second trigger arriving while a dialog is up is skipped instead of
+    /// stacking a second dialog.
     /// </summary>
     private async Task<bool> ConfirmChangeAsync(string reason, CancellationToken cancellationToken)
     {
         var handler = ConfirmRotation;
         if (handler is null)
             return true;
+
+        if (Interlocked.CompareExchange(ref _confirmInFlight, 1, 0) != 0)
+        {
+            Log.Info("A rotation confirmation is already open; skipping this trigger instead of stacking dialogs.");
+            return false;
+        }
 
         try
         {
@@ -391,6 +425,10 @@ public sealed class AppController : IAsyncDisposable
         {
             Log.Warn($"The rotation confirmation could not be shown ({ex.Message}); no rotation was started.");
             return false;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _confirmInFlight, 0);
         }
     }
 
@@ -450,8 +488,8 @@ public sealed class AppController : IAsyncDisposable
 
                     if (ready.Success)
                     {
-                        try { await VerifyRelayExitIpAsync(ready.Trace?.Ip ?? "", _lifetime.Token); }
-                        catch (Exception ex) { Log.Debug("Relay check after tunnel repair: " + ex.Message); }
+                        try { await VerifyWarpExitIpAsync(ready.Trace?.Ip ?? "", _lifetime.Token); }
+                        catch (Exception ex) { Log.Debug("Tunnel check after repair: " + ex.Message); }
                     }
                 }
                 finally
@@ -516,15 +554,16 @@ public sealed class AppController : IAsyncDisposable
     }
 
     /// <summary>
-    /// Proves that traffic sent through the relay really exits via the expected WARP IP —
-    /// not just that the WARP proxy itself reports a new IP. Stale tunnels are closed
-    /// between attempts so a retry re-dials through the fresh registration.
+    /// Proves that the new WARP tunnel really exits via the expected IP by fetching a
+    /// trace through the local WARP proxy. This works even while the relay's WARP gate
+    /// is closed, which keeps unverified IPs unreachable for OpenCode traffic. Stale
+    /// tunnels are closed between attempts so a retry re-dials the fresh registration.
     /// </summary>
-    public async Task<bool> VerifyRelayExitIpAsync(string expectedIp, CancellationToken cancellationToken = default)
+    public async Task<bool> VerifyWarpExitIpAsync(string expectedIp, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(expectedIp))
         {
-            Log.Warn("Relay exit verification skipped: the current WARP exit IP is unknown.");
+            Log.Warn("Exit IP verification skipped: the current WARP exit IP is unknown.");
             LastRelayVerified = null;
             RaiseStateChanged();
             return false;
@@ -533,11 +572,16 @@ public sealed class AppController : IAsyncDisposable
         const int attempts = 3;
         for (var attempt = 1; attempt <= attempts; attempt++)
         {
-            var trace = await TestRelayAsync(cancellationToken);
+            var trace = await TraceProbe.GetAsync(
+                WarpProxyUrl,
+                "https://opencode.ai/cdn-cgi/trace",
+                15,
+                cancellationToken);
+            LastRelayTrace = trace;
             if (trace.Ok && TraceProbe.SameExit(trace.Ip, expectedIp))
             {
                 LastRelayVerified = true;
-                Log.Info($"Verified: the relay's traffic now exits via {trace.Ip} ({trace.Colo}) — " +
+                Log.Info($"Verified: traffic through the tunnel now exits via {trace.Ip} ({trace.Colo}) — " +
                          "the new WARP IP is actually in use.");
                 RaiseStateChanged();
                 return true;
@@ -545,8 +589,8 @@ public sealed class AppController : IAsyncDisposable
 
             if (attempt < attempts)
             {
-                Log.Warn($"Relay check {attempt}/{attempts}: traffic through the relay exits via " +
-                         $"{(trace.Ip.Length > 0 ? trace.Ip : "an unknown IP")} but the WARP IP is {expectedIp}; " +
+                Log.Warn($"Exit check {attempt}/{attempts}: the tunnel exits via " +
+                         $"{(trace.Ip.Length > 0 ? trace.Ip : "an unknown IP")} but the new WARP IP is {expectedIp}; " +
                          "closing stale tunnels and retrying.");
                 Relay.ResetWarpConnections();
                 await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
@@ -554,8 +598,8 @@ public sealed class AppController : IAsyncDisposable
         }
 
         LastRelayVerified = false;
-        LastError = $"The relay did not confirm that the WARP IP {expectedIp} is being used.";
-        Log.Warn("Relay verification failed: OpenCode traffic may still leave through the previous exit. " +
+        LastError = $"The tunnel did not confirm that the WARP IP {expectedIp} is being used.";
+        Log.Warn("Exit IP verification failed: OpenCode traffic may still leave through the previous exit. " +
                  "The next rotation, tunnel repair, or health check will retry.");
         RaiseStateChanged();
         return false;
@@ -616,6 +660,35 @@ public sealed class AppController : IAsyncDisposable
         AiHosts.Reload();
         Policy.ReloadDirectRules();
         Log.SetLevel(Settings.LogLevel);
+
+        // Unlike the relay's own port, a new WARP proxy port applies live: move the
+        // warp-cli listener first, then point the relay at it.
+        if (Relay.UpstreamPort != Settings.WarpProxyPort)
+        {
+            var newPort = Settings.WarpProxyPort;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (Warp.Available)
+                    {
+                        var result = await Warp.RunAsync(
+                            new[] { "proxy", "port", newPort.ToString() },
+                            TimeSpan.FromSeconds(20),
+                            CancellationToken.None);
+                        if (!result.Ok)
+                            Log.Warn($"warp-cli proxy port {newPort} failed: {result.Combined.Split('\n').FirstOrDefault()?.Trim()}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Warn("Could not move the WARP proxy port: " + ex.Message);
+                }
+
+                Relay.UpstreamPort = newPort;
+            });
+        }
+
         Log.Debug("Settings saved.");
         RaiseStateChanged();
     }
@@ -731,6 +804,11 @@ public sealed class AppController : IAsyncDisposable
         {
             try { await _healthLoop.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
             _healthLoop = null;
+        }
+        if (_autoRotateLoop is not null)
+        {
+            try { await _autoRotateLoop.WaitAsync(TimeSpan.FromSeconds(3)); } catch { }
+            _autoRotateLoop = null;
         }
 
         if (stopOpenCode)

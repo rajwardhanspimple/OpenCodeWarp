@@ -1445,7 +1445,10 @@ internal sealed class MainForm : Form
     /// <summary>
     /// Shows the "allow IP change?" dialog on the UI thread and awaits the user's
     /// answer. Automatic rotations (quota hit, rate limit, scheduled timer) come from
-    /// background threads; the manual Rotate button skips this entirely.
+    /// background threads; the manual Rotate button skips this entirely. The box is
+    /// shown top-most through an invisible owner so it is never hidden behind a
+    /// window that is minimized to the tray. The controller allows only one
+    /// confirmation at a time, so dialogs cannot stack.
     /// </summary>
     private Task<bool> ConfirmRotationOnUiAsync(RotationPrompt prompt)
     {
@@ -1454,11 +1457,22 @@ internal sealed class MainForm : Form
         {
             try
             {
+                using var owner = new Form
+                {
+                    TopMost = true,
+                    ShowInTaskbar = false,
+                    FormBorderStyle = FormBorderStyle.None,
+                    StartPosition = FormStartPosition.Manual,
+                    Location = new Point(-3000, -3000),
+                    Size = new Size(1, 1)
+                };
+                owner.Show();
+
                 var text = $"Reason: {prompt.Reason}\n" +
                            $"Current WARP exit IP: {(string.IsNullOrWhiteSpace(prompt.CurrentIp) ? "unknown" : prompt.CurrentIp)}\n\n" +
                            "Allow changing the IP now?\n" +
                            "(OpenCode stays open either way. Declining skips this rotation.)";
-                var choice = MessageBox.Show(this, text, "Allow WARP IP change?",
+                var choice = MessageBox.Show(owner, text, "Allow WARP IP change?",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Question,
                     MessageBoxDefaultButton.Button2);
                 completion.TrySetResult(choice == DialogResult.Yes);
@@ -1582,9 +1596,11 @@ internal sealed class MainForm : Form
         var span = DateTime.Now - startedAt.Value;
         if (span < TimeSpan.Zero)
             span = TimeSpan.Zero;
-        return span.TotalHours >= 1
-            ? $"Up {span.Hours:00}:{span.Minutes:00}:{span.Seconds:00}"
-            : $"Up {span.Minutes:00}:{span.Seconds:00}";
+        if (span.TotalDays >= 1)
+            return $"Up {span.Days}d {span.Hours:00}h {span.Minutes:00}m";
+        if (span.TotalHours >= 1)
+            return $"Up {span.Hours:00}:{span.Minutes:00}:{span.Seconds:00}";
+        return $"Up {span.Minutes:00}:{span.Seconds:00}";
     }
 
     private static FlatButton SmallButton(string text, int width, int height)

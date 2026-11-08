@@ -77,7 +77,7 @@ public sealed record WarpTunnelFailure(
 public sealed class RelayProxy : IAsyncDisposable
 {
     private readonly int _requestedPort;
-    private readonly int _warpPort;
+    private int _warpPort;
     private readonly HostPolicy _policy;
     private readonly AppLog _log;
     private readonly bool _logDirect;
@@ -102,6 +102,23 @@ public sealed class RelayProxy : IAsyncDisposable
         _policy = policy;
         _log = log;
         _logDirect = logDirectConnections;
+    }
+
+    /// <summary>
+    /// The local WARP proxy port the relay dials. Unlike the relay's own port, a change
+    /// applies immediately: every new connection dials the current value, so saving a new
+    /// WARP proxy port in Settings takes effect without restarting the app.
+    /// </summary>
+    public int UpstreamPort
+    {
+        get => _warpPort;
+        set
+        {
+            if (_warpPort == value)
+                return;
+            _warpPort = value;
+            _log.Info($"WARP proxy port changed to {value}; new relay connections dial it immediately.");
+        }
     }
 
     public int BoundPort => _listener is null
