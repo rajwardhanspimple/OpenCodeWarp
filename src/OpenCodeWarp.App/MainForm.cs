@@ -679,6 +679,7 @@ internal sealed class MainForm : Form
     {
         _log.EntryWritten += entry => PostToUi(() => AppendLogEntry(entry));
         _controller.StateChanged += () => PostToUi(RefreshUi);
+        _controller.ConfirmRotation = ConfirmRotationOnUiAsync;
 
         _controller.QuotaDetected += hit => PostToUi(() =>
         {
@@ -1439,6 +1440,47 @@ internal sealed class MainForm : Form
             MessageBox.Show(this, "Could not open folder:\n" + ex.Message, "OpenCode Warp",
                 MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
+    }
+
+    /// <summary>
+    /// Shows the "allow IP change?" dialog on the UI thread and awaits the user's
+    /// answer. Automatic rotations (quota hit, rate limit, scheduled timer) come from
+    /// background threads; the manual Rotate button skips this entirely.
+    /// </summary>
+    private Task<bool> ConfirmRotationOnUiAsync(RotationPrompt prompt)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Action ask = () =>
+        {
+            try
+            {
+                var text = $"Reason: {prompt.Reason}\n" +
+                           $"Current WARP exit IP: {(string.IsNullOrWhiteSpace(prompt.CurrentIp) ? "unknown" : prompt.CurrentIp)}\n\n" +
+                           "Allow changing the IP now?\n" +
+                           "(OpenCode stays open either way. Declining skips this rotation.)";
+                var choice = MessageBox.Show(this, text, "Allow WARP IP change?",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2);
+                completion.TrySetResult(choice == DialogResult.Yes);
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        };
+
+        if (IsDisposed || Disposing || !IsHandleCreated)
+        {
+            // The window is gone; never rotate without consent.
+            completion.TrySetResult(false);
+            return completion.Task;
+        }
+
+        if (InvokeRequired)
+            BeginInvoke(ask);
+        else
+            ask();
+        return completion.Task;
     }
 
     private void PostToUi(Action action)

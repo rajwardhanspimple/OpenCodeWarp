@@ -78,9 +78,12 @@ public sealed class OpenCodeUsabilityProbe
             return UsabilityProbeResult.Skipped("the OpenCode CLI was not found");
 
         var stopwatch = Stopwatch.StartNew();
+        // One fixed archived session is reused for every probe, so probing never
+        // accumulates sessions in OpenCode's store.
         var (application, arguments) = OpenCodeLauncher.BuildCommandLine(
             executable,
-            $"run --model {ProbeModel} --archived --title \"OpenCodeWarp IP probe\" --auto \"{ProbePrompt}\"");
+            $"run --model {ProbeModel} --session ocwarp-ip-probe --archived " +
+            $"--title \"OpenCodeWarp IP probe\" --auto \"{ProbePrompt}\"");
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeoutCts.CancelAfter(Timeout);

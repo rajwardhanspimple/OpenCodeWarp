@@ -324,7 +324,7 @@ public sealed partial class WarpClient
         WarpTrace? lastTrace = null;
         while (DateTime.UtcNow < deadline)
         {
-            await Task.Delay(1000, cancellationToken);
+            await Task.Delay(500, cancellationToken);
             lastTrace = await TraceAsync(cancellationToken);
             if (lastTrace.WarpOn)
             {
@@ -399,7 +399,7 @@ public sealed partial class WarpClient
                 var deadline = DateTime.UtcNow.AddSeconds(Math.Max(12, _settings.WarpWaitSeconds));
                 while (DateTime.UtcNow < deadline)
                 {
-                    await Task.Delay(1000, cancellationToken);
+                    await Task.Delay(500, cancellationToken);
                     lastTrace = await TraceAsync(cancellationToken);
                     if (!lastTrace.WarpOn)
                     {

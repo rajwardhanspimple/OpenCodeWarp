@@ -1,5 +1,8 @@
 namespace OpenCodeWarp;
 
+/// <summary>Everything the UI needs to ask the user before an automatic IP change.</summary>
+public sealed record RotationPrompt(string Reason, string CurrentIp);
+
 public sealed class AppController : IAsyncDisposable
 {
     private readonly SemaphoreSlim _rotationGate = new(1, 1);
@@ -54,6 +57,14 @@ public sealed class AppController : IAsyncDisposable
     public event Action<RotationResult>? RotationFinished;
     public event Action<OpenCodeLaunchResult>? OpenCodeStarted;
     public event Action<int>? OpenCodeExited;
+
+    /// <summary>
+    /// Set by the UI. Every automatic rotation (quota hit, rate limit, scheduled
+    /// timer) calls it first and only rotates when the user allows the IP change.
+    /// Manual rotations from the dashboard button do not ask. When no handler is
+    /// set (headless CLI use), automatic rotations proceed.
+    /// </summary>
+    public Func<RotationPrompt, Task<bool>>? ConfirmRotation { get; set; }
 
     public AppController(AppSettings settings, AppLog log)
     {
@@ -325,6 +336,8 @@ public sealed class AppController : IAsyncDisposable
         {
             if (Settings.RotateOnUsageLimit)
             {
+                if (!await ConfirmChangeAsync("OpenCode hit the free usage limit", _lifetime.Token))
+                    return;
                 Log.Warn("Free usage limit detected; rotating WARP so OpenCode gets a fresh exit IP. " +
                          "OpenCode stays open. If the provider enforces the limit on the account, " +
                          "the new IP will not restore access on its own.");
@@ -346,7 +359,39 @@ public sealed class AppController : IAsyncDisposable
         }
 
         if (Settings.RotateOnRateLimit)
+        {
+            if (!await ConfirmChangeAsync("OpenCode was rate-limited (HTTP 429)", _lifetime.Token))
+                return;
             await RotateAsync("rate limit", false, _lifetime.Token);
+        }
+    }
+
+    /// <summary>
+    /// Asks the UI whether an automatic IP change is allowed. Without a UI handler
+    /// (headless CLI) the change proceeds.
+    /// </summary>
+    private async Task<bool> ConfirmChangeAsync(string reason, CancellationToken cancellationToken)
+    {
+        var handler = ConfirmRotation;
+        if (handler is null)
+            return true;
+
+        try
+        {
+            var allowed = await handler(new RotationPrompt(reason, LastExitIp ?? ""));
+            if (!allowed)
+                Log.Warn($"IP change declined by the user ({reason}); no rotation was started.");
+            return allowed;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"The rotation confirmation could not be shown ({ex.Message}); no rotation was started.");
+            return false;
+        }
     }
 
     private void OnWarpTunnelFailed(WarpTunnelFailure failure)
@@ -534,6 +579,13 @@ public sealed class AppController : IAsyncDisposable
                 var due = _lastRotationUtc.AddMinutes(minutes);
                 if (DateTimeOffset.Now < due)
                     continue;
+
+                if (!await ConfirmChangeAsync($"scheduled rotation is due (every {minutes} minutes)", cancellationToken))
+                {
+                    // Do not re-ask every 15 seconds; wait a full interval first.
+                    _lastRotationUtc = DateTimeOffset.Now;
+                    continue;
+                }
 
                 Log.Info($"Auto-rotation is due (interval: {minutes} min).");
                 await RotateAsync($"scheduled auto-rotation (every {minutes} minutes)", force: false, cancellationToken);
