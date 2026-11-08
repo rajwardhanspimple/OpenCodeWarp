@@ -176,11 +176,11 @@ public sealed class AppController : IAsyncDisposable
     }
 
     /// <summary>
-    /// Rotates WARP, verifies the new exit IP through the relay, and (by default)
-    /// proves the IP is actually usable by sending a one-word prompt to the free
-    /// DeepSeek model through OpenCode. A burned IP (usage limit, 429, no response)
-    /// triggers another rotation, up to RotationAttempts rounds. It deliberately
-    /// never calls OpenCode.StopAsync.
+    /// Rotates WARP, verifies the new exit IP through the relay, and then proves the
+    /// IP is actually usable by sending a one-word prompt to the free DeepSeek model
+    /// through the OpenCode CLI. The probe is compulsory: a burned IP (usage limit,
+    /// 429, no response) triggers another rotation, up to RotationAttempts rounds.
+    /// It deliberately never calls OpenCode.StopAsync.
     /// </summary>
     public async Task<RotationResult> RotateAsync(
         string reason,
@@ -198,10 +198,8 @@ public sealed class AppController : IAsyncDisposable
             RaiseStateChanged();
             Log.Warn($"Rotation requested: {reason}. OpenCode will stay open; new AI connections wait for the tunnel.");
 
-            // With the usability probe enabled each round is a full rotate + verify +
-            // probe cycle; without it a single rotation keeps the old behaviour, where
-            // RotationAttempts counts the retries inside Warp.RotateAsync.
-            var rounds = Settings.ProbeOnRotation ? Math.Max(1, Settings.RotationAttempts) : 1;
+            // Each round is a full rotate + verify + probe cycle.
+            var rounds = Math.Max(1, Settings.RotationAttempts);
             RotationResult? result = null;
 
             for (var round = 1; round <= rounds; round++)
@@ -245,16 +243,6 @@ public sealed class AppController : IAsyncDisposable
 
                 try { await VerifyRelayExitIpAsync(result.NewIp, cancellationToken); }
                 catch (Exception ex) { Log.Warn("Relay verification after rotation failed: " + ex.Message); }
-
-                if (!Settings.ProbeOnRotation)
-                    break;
-
-                if (!OpenCode.IsRunning)
-                {
-                    Log.Info($"Usability probe skipped: OpenCode is not running, so there is no CLI to ask " +
-                             $"{OpenCodeUsabilityProbe.ProbeModel} with. The IP is only relay-verified.");
-                    break;
-                }
 
                 Log.Info($"Usability probe: asking {OpenCodeUsabilityProbe.ProbeModel} through the new IP " +
                          "via the OpenCode CLI...");

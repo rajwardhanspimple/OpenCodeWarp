@@ -14,7 +14,6 @@ internal sealed class SettingsForm : Form
     private CheckBox _autoLaunch = null!;
     private CheckBox _rateRotate = null!;
     private CheckBox _usageRotate = null!;
-    private CheckBox _probeRotate = null!;
     private TextBox _autoRotateMinutes = null!;
     private TextBox _relayPort = null!;
     private TextBox _warpPort = null!;
@@ -202,13 +201,12 @@ internal sealed class SettingsForm : Form
         _autoLaunch = Check("Launch OpenCode automatically when the relay starts", _draft.AutoLaunchOpenCode);
         _rateRotate = Check("Rotate on HTTP 429 / rate-limit errors", _draft.RotateOnRateLimit);
         _usageRotate = Check("Rotate on free usage limit errors", _draft.RotateOnUsageLimit);
-        _probeRotate = Check("After every rotation, test the IP with the free DeepSeek model and rotate again if burned",
-            _draft.ProbeOnRotation);
 
         var hint = Hint(
             "Leave the executable empty to auto-detect the installed OpenCode CLI. Only OpenCode's process tree " +
             "receives the relay proxy. Connection resets trigger a WARP reconnect and endpoint check, " +
-            "without restarting OpenCode or changing models.");
+            "without restarting OpenCode or changing models. After every rotation the free DeepSeek model is " +
+            "probed through the new IP; a burned IP is rotated away automatically.");
 
         var body = NewBody();
         AddField(body, "OpenCode executable  (empty = auto-detect)", executable);
@@ -218,7 +216,6 @@ internal sealed class SettingsForm : Form
         AddFull(body, _autoLaunch);
         AddFull(body, _usageRotate);
         AddFull(body, _rateRotate);
-        AddFull(body, _probeRotate);
 
         return Section(
             "OpenCode",
@@ -441,7 +438,6 @@ internal sealed class SettingsForm : Form
         _draft.AutoLaunchOpenCode = _autoLaunch.Checked;
         _draft.RotateOnRateLimit = _rateRotate.Checked;
         _draft.RotateOnUsageLimit = _usageRotate.Checked;
-        _draft.ProbeOnRotation = _probeRotate.Checked;
         _draft.AutoRotateMinutes = autoRotate;
         _draft.RelayPort = relayPort;
         _draft.WarpProxyPort = warpPort;
