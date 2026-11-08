@@ -1,13 +1,32 @@
 param(
     [string]$Configuration = "Release",
-    [string]$Runtime = "win-x64"
+    [string]$Runtime = "win-x64",
+    [switch]$Standalone
 )
 
 $ErrorActionPreference = "Stop"
 $root = $PSScriptRoot
 $dist = Join-Path $root "dist"
+$standaloneOut = Join-Path $root "dist-standalone"
 $appProject = Join-Path $root "src\OpenCodeWarp.App\OpenCodeWarp.App.csproj"
 $cliProject = Join-Path $root "src\OpenCodeWarp.Cli\OpenCodeWarp.Cli.csproj"
+
+if ($Standalone) {
+    # One portable exe with the .NET runtime bundled. Recipients run it without
+    # installing the .NET 8 Desktop Runtime first.
+    Write-Host "Building the standalone OpenCodeWarp.exe (bundles the .NET runtime; large file)..." -ForegroundColor Cyan
+    dotnet publish $appProject -c $Configuration -r $Runtime --self-contained true `
+        -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true `
+        -p:IncludeNativeLibrariesForSelfExtract=true `
+        -p:DebugType=None -p:DebugSymbols=false -o $standaloneOut
+    if ($LASTEXITCODE -ne 0) { throw "Standalone publish failed." }
+
+    Write-Host ""
+    Write-Host "Done. Output:" -ForegroundColor Green
+    Get-ChildItem $standaloneOut | Select-Object Name, Length | Format-Table -AutoSize
+    Write-Host "Send $standaloneOut\OpenCodeWarp.exe directly - no .NET runtime install needed."
+    return
+}
 
 Write-Host "Building OpenCode Warp..." -ForegroundColor Cyan
 if (Get-Process OpenCodeWarp -ErrorAction SilentlyContinue) {

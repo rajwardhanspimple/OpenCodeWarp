@@ -82,6 +82,16 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\build.ps1
 
 > The `-File ... does not exist` error means the command was run from a different folder. `cd` into the repo folder first, or just double-click `build.cmd` — it always finds its own folder.
 
+### Portable single-exe build (no .NET install needed)
+
+To produce one self-contained exe that bundles the .NET runtime (~68 MB, recipients need no prerequisites):
+
+```powershell
+.\build.cmd -Standalone
+```
+
+The result is `dist-standalone\OpenCodeWarp.exe` — send that single file anywhere and double-click it. The regular `dist\` build stays ~0.4 MB but requires the [.NET 8 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/8.0).
+
 That produces:
 
 - `dist\OpenCodeWarp.exe` — the Windows dashboard
