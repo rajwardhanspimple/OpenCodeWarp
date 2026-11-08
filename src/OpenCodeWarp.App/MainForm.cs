@@ -712,9 +712,16 @@ internal sealed class MainForm : Form
                 var verified = _controller.LastRelayVerified == true
                     ? " Verified: OpenCode is using the new IP."
                     : " Warning: the relay has not confirmed the new IP yet.";
+                var probe = _controller.LastProbe;
+                var probeText = probe is null
+                    ? ""
+                    : probe.Usable
+                        ? " Usability probe passed: the free DeepSeek model responded."
+                        : $" Usability probe FAILED: {probe.Detail}";
+                var ok = _controller.LastRelayVerified == true && probe is null or { Usable: true };
                 Balloon("WARP IP rotated",
-                    $"{ShortIp(result.OldIp)} → {ShortIp(result.NewIp)} ({result.Colo}). OpenCode was not restarted.{verified}",
-                    _controller.LastRelayVerified == true ? ToolTipIcon.Info : ToolTipIcon.Warning);
+                        $"{ShortIp(result.OldIp)} → {ShortIp(result.NewIp)} ({result.Colo}). OpenCode was not restarted.{verified}{probeText}",
+                        ok ? ToolTipIcon.Info : ToolTipIcon.Warning);
             }
             else
             {

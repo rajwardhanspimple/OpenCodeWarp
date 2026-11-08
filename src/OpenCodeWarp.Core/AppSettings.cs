@@ -35,6 +35,12 @@ public sealed class AppSettings
     /// <summary>Rotate WARP when OpenCode's log reports the free usage limit.</summary>
     public bool RotateOnUsageLimit { get; set; } = true;
 
+    /// <summary>
+    /// After every rotation, test the new IP end to end by asking the free DeepSeek
+    /// model (via the OpenCode CLI) for a one-word reply; rotate again when it is burned.
+    /// </summary>
+    public bool ProbeOnRotation { get; set; } = true;
+
     /// <summary>Scheduled rotation interval in minutes; 0 disables the timer.</summary>
     public int AutoRotateMinutes { get; set; } = 30;
 

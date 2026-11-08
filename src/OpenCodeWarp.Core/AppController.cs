@@ -13,6 +13,7 @@ public sealed class AppController : IAsyncDisposable
     private int _recoveryRunning;
     private int _tunnelFailureCount;
     private DateTimeOffset _tunnelFailureWindow = DateTimeOffset.MinValue;
+    private DateTimeOffset _lastProbeBurnedAt = DateTimeOffset.MinValue;
 
     public AppSettings Settings { get; }
     public AppLog Log { get; }
@@ -21,6 +22,7 @@ public sealed class AppController : IAsyncDisposable
     public RelayProxy Relay { get; }
     public WarpClient Warp { get; }
     public OpenCodeLauncher OpenCode { get; }
+    public OpenCodeUsabilityProbe Probe { get; }
     public QuotaWatcher Watcher { get; }
 
     public bool IsStarted => _started;
@@ -38,6 +40,9 @@ public sealed class AppController : IAsyncDisposable
     /// false when the last check could not confirm it; null before the first check.
     /// </summary>
     public bool? LastRelayVerified { get; private set; }
+
+    /// <summary>Outcome of the last DeepSeek-free-model usability probe; null when none ran yet.</summary>
+    public UsabilityProbeResult? LastProbe { get; private set; }
     public string? LastError { get; private set; }
     public bool WarpOnline => LastTrace?.WarpOn == true;
     public bool OpenCodeRunning => OpenCode.IsRunning;
@@ -59,6 +64,7 @@ public sealed class AppController : IAsyncDisposable
         Relay = new RelayProxy(settings.RelayPort, settings.WarpProxyPort, Policy, log, settings.LogDirectConnections);
         Warp = new WarpClient(settings, log);
         OpenCode = new OpenCodeLauncher(settings, log);
+        Probe = new OpenCodeUsabilityProbe(settings, OpenCode, log);
         Watcher = new QuotaWatcher(settings, log, HandleQuotaAsync);
 
         Relay.StatsChanged += RaiseStateChanged;
@@ -170,8 +176,11 @@ public sealed class AppController : IAsyncDisposable
     }
 
     /// <summary>
-    /// Rotates WARP and resets stale WARP tunnels. It deliberately never calls
-    /// OpenCode.StopAsync, so a free-limit hit cannot close or restart the TUI.
+    /// Rotates WARP, verifies the new exit IP through the relay, and (by default)
+    /// proves the IP is actually usable by sending a one-word prompt to the free
+    /// DeepSeek model through OpenCode. A burned IP (usage limit, 429, no response)
+    /// triggers another rotation, up to RotationAttempts rounds. It deliberately
+    /// never calls OpenCode.StopAsync.
     /// </summary>
     public async Task<RotationResult> RotateAsync(
         string reason,
@@ -184,14 +193,42 @@ public sealed class AppController : IAsyncDisposable
             IsRotating = true;
             LastError = null;
             LastRelayVerified = null;
+            LastProbe = null;
             Relay.PauseWarp("rotation");
             RaiseStateChanged();
             Log.Warn($"Rotation requested: {reason}. OpenCode will stay open; new AI connections wait for the tunnel.");
 
-            var result = await Warp.RotateAsync(reason, force, cancellationToken);
-            _lastRotationUtc = DateTimeOffset.UtcNow;
-            if (result.Success)
+            // With the usability probe enabled each round is a full rotate + verify +
+            // probe cycle; without it a single rotation keeps the old behaviour, where
+            // RotationAttempts counts the retries inside Warp.RotateAsync.
+            var rounds = Settings.ProbeOnRotation ? Math.Max(1, Settings.RotationAttempts) : 1;
+            RotationResult? result = null;
+
+            for (var round = 1; round <= rounds; round++)
             {
+                var roundReason = round == 1 ? reason : $"{reason} (burned-IP retry {round - 1})";
+                result = await Warp.RotateAsync(roundReason, force && round == 1, cancellationToken);
+                _lastRotationUtc = DateTimeOffset.UtcNow;
+
+                if (!result.Success)
+                {
+                    LastError = result.Error ?? "WARP rotation failed";
+                    var closed = Relay.ResetWarpConnections();
+                    Log.Warn($"Rotation failed ({LastError}); closed {closed} WARP tunnel(s). " +
+                             "Trying to restore WARP before releasing waiting connections.");
+
+                    try
+                    {
+                        var ready = await Warp.EnsureReadyAsync(cancellationToken);
+                        ApplyReady(ready);
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warn("WARP recovery after a failed rotation did not complete: " + ex.Message);
+                    }
+                    break;
+                }
+
                 LastTrace = result.LastTrace;
                 LastExitIp = result.NewIp;
                 LastColo = result.Colo;
@@ -199,40 +236,69 @@ public sealed class AppController : IAsyncDisposable
                 RotationCount++;
                 LastError = null;
 
-                var closed = Relay.ResetWarpConnections();
-                Log.Info($"New exit IP {result.NewIp} is live; closed {closed} stale WARP tunnel(s). " +
+                var openTunnels = Relay.ResetWarpConnections();
+                Log.Info($"New exit IP {result.NewIp} is live; closed {openTunnels} stale WARP tunnel(s). " +
                          "OpenCode was not restarted.");
-            }
-            else
-            {
-                LastError = result.Error ?? "WARP rotation failed";
-                var closed = Relay.ResetWarpConnections();
-                Log.Warn($"Rotation failed ({LastError}); closed {closed} WARP tunnel(s). " +
-                         "Trying to restore WARP before releasing waiting connections.");
 
-                try
-                {
-                    var ready = await Warp.EnsureReadyAsync(cancellationToken);
-                    ApplyReady(ready);
-                }
-                catch (Exception ex)
-                {
-                    Log.Warn("WARP recovery after a failed rotation did not complete: " + ex.Message);
-                }
-            }
+                // Let the verification and the probe send traffic through the new tunnel.
+                Relay.ResumeWarp();
 
-            // Release waiting AI connections only after the new tunnel (or a repair
-            // attempt) is ready. They then connect without seeing a rotation 502.
-            Relay.ResumeWarp();
-
-            if (result.Success)
-            {
                 try { await VerifyRelayExitIpAsync(result.NewIp, cancellationToken); }
                 catch (Exception ex) { Log.Warn("Relay verification after rotation failed: " + ex.Message); }
+
+                if (!Settings.ProbeOnRotation)
+                    break;
+
+                if (!OpenCode.IsRunning)
+                {
+                    Log.Info($"Usability probe skipped: OpenCode is not running, so there is no CLI to ask " +
+                             $"{OpenCodeUsabilityProbe.ProbeModel} with. The IP is only relay-verified.");
+                    break;
+                }
+
+                Log.Info($"Usability probe: asking {OpenCodeUsabilityProbe.ProbeModel} through the new IP " +
+                         "via the OpenCode CLI...");
+                var probe = await Probe.ProbeAsync(ProxyUrl, cancellationToken);
+                LastProbe = probe;
+                if (!probe.Usable && probe.RotateAgain)
+                    _lastProbeBurnedAt = DateTimeOffset.Now;
+                RaiseStateChanged();
+
+                if (probe.Usable)
+                {
+                    Log.Info($"Usability probe PASSED in {probe.Duration.TotalSeconds:0.0}s: {probe.Detail} " +
+                             "The new IP is genuinely usable for model traffic.");
+                    break;
+                }
+
+                if (round >= rounds)
+                {
+                    LastError = $"The usability probe failed on every rotated IP: {probe.Detail}";
+                    Log.Warn($"Usability probe FAILED again ({probe.Detail}); this was the last rotation round. " +
+                             "OpenCode keeps its session and can retry on the next trigger.");
+                    break;
+                }
+
+                if (!probe.RotateAgain)
+                {
+                    LastError = $"The usability probe failed for a reason that rotating cannot fix: {probe.Detail}";
+                    Log.Warn("Keeping the current IP; not rotating again because: " + probe.Detail);
+                    break;
+                }
+
+                Log.Warn($"Usability probe FAILED: {probe.Detail} The IP looks burned; blocking new AI " +
+                         $"connections and rotating again (round {round + 1}/{rounds}).");
+                LastError = $"The new IP was burned ({probe.Detail}); rotating again.";
+                Relay.PauseWarp("burned IP");
+                RaiseStateChanged();
             }
 
-            RotationFinished?.Invoke(result);
-            return result;
+            // Never leave the gate closed: if every round was burned, OpenCode should see
+            // the provider's own errors rather than wait forever for a healthy tunnel.
+            Relay.ResumeWarp();
+
+            RotationFinished?.Invoke(result!);
+            return result!;
         }
         finally
         {
@@ -245,6 +311,23 @@ public sealed class AppController : IAsyncDisposable
 
     private async Task HandleQuotaAsync(QuotaHit hit)
     {
+        // A burned-IP probe writes the same usage-limit lines into OpenCode's log that
+        // the watcher tails. The rotation loop has already reacted to it, so do not
+        // chain another rotation from our own probe output.
+        if ((hit.Kind == QuotaKind.UsageLimit || hit.Kind == QuotaKind.RateLimit)
+            && DateTimeOffset.Now - _lastProbeBurnedAt < TimeSpan.FromMinutes(3))
+        {
+            Log.Info("Ignoring a quota hit that was produced by the usability probe itself; " +
+                     "the rotation loop is already handling the burned IP.");
+            return;
+        }
+
+        if (IsRotating)
+        {
+            Log.Info("Quota hit ignored: a rotation (with its usability probe) is already running.");
+            return;
+        }
+
         Log.Warn($"Quota detector fired: {hit.Kind} at {hit.DetectedAt:HH:mm:ss} " +
                  $"({Path.GetFileName(hit.File)})" +
                  (hit.SessionId is null ? "." : $" for {hit.SessionId}."));

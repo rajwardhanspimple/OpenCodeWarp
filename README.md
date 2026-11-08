@@ -26,7 +26,8 @@ The app is self-contained in its own folder. It does not modify OpenCode's insta
 8. Poll `https://www.cloudflare.com/cdn-cgi/trace` until it reports `warp=on` with a **different exit IP**.
 9. Close stale WARP tunnels and open the gate. Waiting AI connections continue through the new tunnel. Do **not** touch the OpenCode process.
 10. **Verify the new IP is really used.** After every rotation (and at startup and after tunnel repairs) the app fetches `opencode.ai/cdn-cgi/trace` *through the relay* and compares the exit IP with the new WARP IP. It retries up to three times, closing stale tunnels between attempts, and logs `Verified: the relay's traffic now exits via <IP>` — or a warning if the new IP is not confirmed.
-11. If a WARP CONNECT returns 502/503/504, the relay retries three times with a short backoff. Two failed destinations within 30 seconds trigger an automatic WARP reconnect.
+11. **Usability probe (on by default).** A relay-verified IP can still be burned — the provider may reject it with a usage-limit or 429 error. So the app then runs `opencode run --model opencode/deepseek-v4.1-flash-free --archived --auto "Reply with exactly one word: OK"` with the relay proxy environment, exactly like a human typing in a terminal. A real reply means the IP works; a usage-limit/429 rejection or no response within 90 seconds means the IP is burned and the app **rotates again**, up to `Rotation attempts` rounds, pausing new AI connections between rounds. Probe sessions are archived and stay out of the session list, and probe failures do not re-trigger the quota watcher.
+12. If a WARP CONNECT returns 502/503/504, the relay retries three times with a short backoff. Two failed destinations within 30 seconds trigger an automatic WARP reconnect.
 
 A 45-second cooldown and a minimum spacing between rotations prevent Cloudflare registration throttling.
 
@@ -139,6 +140,7 @@ Stored at `%LOCALAPPDATA%\OpenCodeWarp\settings.json`.
 | Rotate on usage limit | on | Rotate WARP when the log reports the free usage limit. |
 | Rotate on rate limit | off | Also rotate on HTTP 429 / rate-limit errors. |
 | Auto-rotate WARP every | `30` | Minutes between scheduled rotations; `0` disables the timer. |
+| Usability probe after rotation | on | Test each new IP by prompting the free DeepSeek V4.1 Flash Free model through the OpenCode CLI; rotate again when burned. |
 | Auto-launch OpenCode | off | Start OpenCode when the relay starts. |
 | Start with Windows | off | HKCU Run entry; starts minimized to the tray. |
 | Minimum seconds between rotations | 25 | Cloudflare throttling guard. |

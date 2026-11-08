@@ -623,7 +623,13 @@ public sealed class OpenCodeLauncher : IDisposable
         }
     }
 
-    private List<KeyValuePair<string, string>> BuildEnvironmentEntries(string proxyUrl, string serverPassword)
+    /// <summary>
+    /// Builds the process environment for a child OpenCode process: everything inherited
+    /// except proxy and stale launcher variables, plus the relay proxy entries. With a
+    /// non-null password it also carries the private-server credentials used by the
+    /// managed serve + TUI pair; pass null for one-shot runs such as the usability probe.
+    /// </summary>
+    public List<KeyValuePair<string, string>> BuildEnvironmentEntries(string proxyUrl, string? serverPassword)
     {
         var entries = new List<KeyValuePair<string, string>>();
         foreach (DictionaryEntry raw in Environment.GetEnvironmentVariables())
@@ -647,9 +653,12 @@ public sealed class OpenCodeLauncher : IDisposable
         // The private server gets a known password so the dashboard can switch
         // models after an account quota hit. The attached TUI reads the same
         // password from OPENCODE_PASSWORD when it connects with --server.
-        entries.Add(new("OPENCODE_SERVER_PASSWORD", serverPassword));
-        entries.Add(new("OPENCODE_SERVER_USERNAME", "opencode"));
-        entries.Add(new("OPENCODE_PASSWORD", serverPassword));
+        if (!string.IsNullOrEmpty(serverPassword))
+        {
+            entries.Add(new("OPENCODE_SERVER_PASSWORD", serverPassword));
+            entries.Add(new("OPENCODE_SERVER_USERNAME", "opencode"));
+            entries.Add(new("OPENCODE_PASSWORD", serverPassword));
+        }
         entries.Sort((a, b) => StringComparer.OrdinalIgnoreCase.Compare(a.Key, b.Key));
         return entries;
     }
@@ -668,7 +677,7 @@ public sealed class OpenCodeLauncher : IDisposable
         return handle.AddrOfPinnedObject();
     }
 
-    private static (string Application, string Arguments) BuildCommandLine(
+    public static (string Application, string Arguments) BuildCommandLine(
         string executable,
         string arguments)
     {
