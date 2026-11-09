@@ -30,6 +30,7 @@ public sealed class OpenCodeLauncher : IDisposable
     private readonly AppSettings _settings;
     private readonly AppLog _log;
     private readonly object _gate = new();
+    private readonly List<string> _serverTail = new();
     private readonly SemaphoreSlim _lifecycle = new(1, 1);
     private readonly HttpClient _probe;
     private Process? _process;
@@ -128,7 +129,16 @@ public sealed class OpenCodeLauncher : IDisposable
     public DateTime? StartedAt { get; private set; }
     public string? LastExecutable { get; private set; }
 
-    public string? DiscoverExecutable()
+    /// <summary>First existing candidate; used where a quick guess is enough.</summary>
+    public string? DiscoverExecutable() => DiscoverExecutableCandidates().FirstOrDefault();
+
+    /// <summary>
+    /// Every plausible OpenCode CLI location in preference order (settings override,
+    /// the official installer dir, npm, bun, scoop, winget, Chocolatey, then PATH).
+    /// Callers should verify a candidate actually runs — a half-installed npm shim
+    /// exists on disk but exits with an error.
+    /// </summary>
+    public List<string> DiscoverExecutableCandidates()
     {
         var candidates = new List<string>();
         if (!string.IsNullOrWhiteSpace(_settings.OpenCodeExe))
@@ -173,17 +183,89 @@ public sealed class OpenCodeLauncher : IDisposable
             catch { }
         }
 
+        var existing = new List<string>();
         foreach (var candidate in candidates)
         {
             try
             {
                 if (File.Exists(candidate))
-                    return Path.GetFullPath(candidate);
+                    existing.Add(Path.GetFullPath(candidate));
             }
             catch { }
         }
 
-        return null;
+        return existing;
+    }
+
+    /// <summary>Runs <c>opencode --version</c> to prove a candidate actually works.</summary>
+    private async Task<(bool Ok, string Version, string Detail)> VerifyExecutableAsync(
+        string executable,
+        CancellationToken cancellationToken)
+    {
+        var (application, arguments) = BuildCommandLine(executable, "--version");
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = application,
+                Arguments = arguments,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            using var process = new Process { StartInfo = psi };
+            if (!process.Start())
+                return (false, "", "did not start");
+
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeout.CancelAfter(TimeSpan.FromSeconds(12));
+            var stdoutTask = process.StandardOutput.ReadToEndAsync(CancellationToken.None);
+            var stderrTask = process.StandardError.ReadToEndAsync(CancellationToken.None);
+            try
+            {
+                await process.WaitForExitAsync(timeout.Token);
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                return (false, "", "did not answer within 12s");
+            }
+
+            var stdout = await SafeOutputAsync(stdoutTask);
+            var stderr = await SafeOutputAsync(stderrTask);
+            var version = stdout.Trim().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault() ?? "";
+            if (process.ExitCode == 0 && version.Length > 0)
+                return (true, version, "");
+
+            var detail = (stderr.Length > 0 ? stderr : stdout).Trim()
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault() ?? $"exit code {process.ExitCode}";
+            return (false, "", ClipDetail(detail, 160));
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return (false, "", $"{ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    private static async Task<string> SafeOutputAsync(Task<string> task)
+    {
+        try { return await task; } catch { return ""; }
+    }
+
+    private static string ClipDetail(string value, int max)
+    {
+        value = value.Replace("\r", " ").Replace("\n", " ").Trim();
+        return value.Length <= max ? value : value[..max] + "...";
     }
 
     public async Task<OpenCodeLaunchResult> StartAsync(
@@ -204,11 +286,12 @@ public sealed class OpenCodeLauncher : IDisposable
                 _serverUrl = null;
                 _serverPort = 0;
                 _serverPassword = null;
+                _serverTail.Clear();
             }
             StopServer(staleServer);
 
-            var executable = DiscoverExecutable();
-            if (executable is null)
+            var candidates = DiscoverExecutableCandidates();
+            if (candidates.Count == 0)
                 return new OpenCodeLaunchResult(false, 0, "",
                     "OpenCode CLI was not found.\n\n" +
                     "Install it with npm (needs Node.js):\n" +
@@ -217,6 +300,33 @@ public sealed class OpenCodeLauncher : IDisposable
                     "  https://opencode.ai/update/api/latest/cli/opencode/\n" +
                     "and copy opencode.exe into %USERPROFILE%\\.opencode\\bin\\.\n\n" +
                     "Then click Launch OpenCode again, or set the exact path in Settings.");
+
+            // A file existing is not enough: a half-installed npm shim (npm 12 skipping
+            // postinstall scripts) is on disk but exits with an error. Verify each
+            // candidate with `opencode --version` and use the first one that works.
+            string? executable = null;
+            var broken = new List<string>();
+            foreach (var candidate in candidates)
+            {
+                var check = await VerifyExecutableAsync(candidate, cancellationToken);
+                if (check.Ok)
+                {
+                    executable = candidate;
+                    _log.Info($"Using OpenCode CLI {check.Version} at {candidate}.");
+                    break;
+                }
+
+                broken.Add($"  {candidate} — {check.Detail}");
+                _log.Warn($"OpenCode CLI candidate failed verification: {candidate} — {check.Detail}");
+            }
+
+            if (executable is null)
+            {
+                return new OpenCodeLaunchResult(false, 0, "",
+                    "OpenCode CLI candidates were found, but none of them works:\n" +
+                    string.Join("\n", broken) +
+                    "\n\nReinstall OpenCode, or pick a working executable in Settings.");
+            }
 
             try
             {
@@ -245,9 +355,14 @@ public sealed class OpenCodeLauncher : IDisposable
                 if (endpoint is null)
                 {
                     var detail = SafeExitDetail(server);
+                    var tail = ServerTailSnapshot();
                     StopFailedLaunch(null, server, tuiStarted: false);
+                    _log.Warn("The private OpenCode server did not become ready" + detail + "." +
+                              (tail.Length > 0 ? "\nServer output:\n" + tail : ""));
                     return new OpenCodeLaunchResult(false, 0, executable,
-                        "The private OpenCode server did not become ready" + detail + ".");
+                        "The private OpenCode server did not become ready" + detail + "." +
+                        (tail.Length > 0 ? "\n\nServer output:\n" + tail : "") +
+                        "\n\nExecutable: " + executable);
                 }
 
                 var tuiArguments = BuildTuiArguments(endpoint.Url);
@@ -493,10 +608,24 @@ public sealed class OpenCodeLauncher : IDisposable
         if (string.IsNullOrWhiteSpace(line))
             return;
 
+        lock (_gate)
+        {
+            _serverTail.Add($"{stream}: {line.Trim()}");
+            if (_serverTail.Count > 12)
+                _serverTail.RemoveAt(0);
+        }
+
         if (line.Contains("server listening", StringComparison.OrdinalIgnoreCase))
             _log.Info("Private OpenCode server: " + line.Trim());
         else
             _log.Debug($"OpenCode server {stream}: {line.Trim()}");
+    }
+
+    /// <summary>The last server output lines, shown when the server fails to start.</summary>
+    private string ServerTailSnapshot()
+    {
+        lock (_gate)
+            return string.Join("\n", _serverTail);
     }
 
     private void LogServerExit(Process process)
