@@ -444,13 +444,24 @@ public sealed class OpenCodeLauncher : IDisposable
         return process;
     }
 
+    /// <summary>Stderr of the last TUI run, so an immediate exit can explain itself.</summary>
+    public string? LastExitDiagnostics { get; private set; }
+
+    private string TuiErrorLogPath => Path.Combine(AppPaths.Root, "tui-last-stderr.log");
+
     private Process StartTui(
         string executable,
         string arguments,
         IReadOnlyList<KeyValuePair<string, string>> environment)
     {
-        var (application, fullArguments) = BuildCommandLine(executable, arguments);
-        var isShim = !string.Equals(application, executable, StringComparison.OrdinalIgnoreCase);
+        // The TUI keeps its visible console (stdout stays interactive), but stderr is
+        // redirected through cmd into a file: when the interface exits immediately with
+        // a nonzero code, that file is the only way to know why.
+        var stderrRedirect = $" 2>\"{TuiErrorLogPath}\"";
+        var cmd = Path.Combine(Environment.SystemDirectory, "cmd.exe");
+        var innerCommand = Quote(executable) + " " + arguments + stderrRedirect;
+        var fullArguments = $"/d /s /c \"{innerCommand}\"";
+        var application = cmd;
         var commandLine = new StringBuilder($"{Quote(application)} {fullArguments}");
         var environmentHandle = BuildEnvironmentBlock(environment, out var handle);
         var startup = new STARTUPINFO
@@ -465,7 +476,7 @@ public sealed class OpenCodeLauncher : IDisposable
         try
         {
             var ok = CreateProcessW(
-                isShim ? null : application,
+                null,
                 commandLine,
                 IntPtr.Zero,
                 IntPtr.Zero,
@@ -583,6 +594,12 @@ public sealed class OpenCodeLauncher : IDisposable
     {
         int exitCode = 0;
         try { exitCode = process.ExitCode; } catch { }
+        var ranLong = false;
+        try
+        {
+            ranLong = DateTime.Now - process.StartTime > TimeSpan.FromSeconds(10);
+        }
+        catch { }
 
         Process? server;
         lock (_gate)
@@ -600,9 +617,47 @@ public sealed class OpenCodeLauncher : IDisposable
         }
 
         StopServer(server);
+
+        // An immediate nonzero exit means the interface crashed at startup; its stderr
+        // was redirected to a file, so the reason is recoverable.
+        LastExitDiagnostics = null;
+        if (exitCode != 0 && !ranLong)
+        {
+            var tail = ReadTuiErrorTail();
+            if (tail.Length > 0)
+            {
+                LastExitDiagnostics = tail;
+                _log.Warn($"OpenCode's interface exited immediately with code {exitCode}.\n" +
+                          $"Interface output:\n{tail}");
+            }
+        }
+
         _log.Info($"OpenCode exited with code {exitCode}.");
         try { Exited?.Invoke(exitCode); } catch { }
         try { StateChanged?.Invoke(); } catch { }
+    }
+
+    /// <summary>Last lines of the TUI's stderr, ANSI-stripped, with known-error advice attached.</summary>
+    private string ReadTuiErrorTail()
+    {
+        try
+        {
+            if (!File.Exists(TuiErrorLogPath))
+                return "";
+            var lines = File.ReadAllLines(TuiErrorLogPath)
+                .Select(l => AnsiEscapeRegex.Replace(l, "").TrimEnd())
+                .Where(l => l.Length > 0)
+                .ToArray();
+            if (lines.Length == 0)
+                return "";
+            var tail = string.Join("\n", lines.TakeLast(12));
+            var advice = BuildServerFailureAdvice(tail);
+            return advice.Length > 0 ? tail + "\n\n" + advice : tail;
+        }
+        catch
+        {
+            return "";
+        }
     }
 
     private static readonly Regex AnsiEscapeRegex = new("\x1B\\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);

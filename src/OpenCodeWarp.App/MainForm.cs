@@ -740,9 +740,36 @@ internal sealed class MainForm : Form
 
         _controller.OpenCodeExited += code => PostToUi(() =>
         {
-            Balloon("OpenCode exited", $"Exit code {code}. The relay is still running.", ToolTipIcon.Info);
+            Balloon("OpenCode exited", $"Exit code {code}. The relay is still running.",
+                code == 0 ? ToolTipIcon.Info : ToolTipIcon.Warning);
+
+            var diagnostics = _controller.OpenCode.LastExitDiagnostics;
+            if (code != 0 && !string.IsNullOrWhiteSpace(diagnostics))
+            {
+                ShowTopMostMessageBox("OpenCode exited unexpectedly",
+                    $"OpenCode's interface exited immediately with code {code}.\n\n" +
+                    $"Interface output:\n{diagnostics}", MessageBoxIcon.Warning);
+            }
             RefreshUi();
         });
+    }
+
+    /// <summary>
+    /// A warning that must be seen even when the dashboard is minimized to the tray.
+    /// </summary>
+    private void ShowTopMostMessageBox(string title, string text, MessageBoxIcon icon)
+    {
+        using var owner = new Form
+        {
+            TopMost = true,
+            ShowInTaskbar = false,
+            FormBorderStyle = FormBorderStyle.None,
+            StartPosition = FormStartPosition.Manual,
+            Location = new Point(-3000, -3000),
+            Size = new Size(1, 1)
+        };
+        owner.Show();
+        MessageBox.Show(owner, text, title, MessageBoxButtons.OK, icon);
     }
 
     protected override async void OnShown(EventArgs e)
