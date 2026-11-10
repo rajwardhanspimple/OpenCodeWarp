@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace OpenCodeWarp;
 
@@ -79,10 +80,11 @@ public sealed class OpenCodeUsabilityProbe
 
         var stopwatch = Stopwatch.StartNew();
         // One fixed archived session is reused for every probe, so probing never
-        // accumulates sessions in OpenCode's store.
+        // accumulates sessions in OpenCode's store. The id must start with "ses_" —
+        // opencode validates the prefix ("Expected a string starting with \"ses\"").
         var (application, arguments) = OpenCodeLauncher.BuildCommandLine(
             executable,
-            $"run --model {ProbeModel} --session ocwarp-ip-probe --archived " +
+            $"run --model {ProbeModel} --session ses_ocwarpprobe01 --archived " +
             $"--title \"OpenCodeWarp IP probe\" --auto \"{ProbePrompt}\"");
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -189,6 +191,8 @@ public sealed class OpenCodeUsabilityProbe
         return null;
     }
 
+    private static readonly Regex AnsiEscapeRegex = new("\x1B\\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
+
     private static async Task<string> SafeReadAsync(Task<string> task)
     {
         try { return await task; } catch { return ""; }
@@ -196,6 +200,7 @@ public sealed class OpenCodeUsabilityProbe
 
     private static string Clip(string value, int max)
     {
+        value = AnsiEscapeRegex.Replace(value, "");
         value = value.Replace("\r", " ").Replace("\n", " ").Trim();
         return value.Length <= max ? value : value[..max] + "...";
     }
