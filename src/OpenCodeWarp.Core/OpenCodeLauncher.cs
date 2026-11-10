@@ -356,12 +356,14 @@ public sealed class OpenCodeLauncher : IDisposable
                 {
                     var detail = SafeExitDetail(server);
                     var tail = ServerTailSnapshot();
+                    var advice = BuildServerFailureAdvice(tail);
                     StopFailedLaunch(null, server, tuiStarted: false);
                     _log.Warn("The private OpenCode server did not become ready" + detail + "." +
                               (tail.Length > 0 ? "\nServer output:\n" + tail : ""));
                     return new OpenCodeLaunchResult(false, 0, executable,
                         "The private OpenCode server did not become ready" + detail + "." +
                         (tail.Length > 0 ? "\n\nServer output:\n" + tail : "") +
+                        (advice.Length > 0 ? "\n\n" + advice : "") +
                         "\n\nExecutable: " + executable);
                 }
 
@@ -603,22 +605,28 @@ public sealed class OpenCodeLauncher : IDisposable
         try { StateChanged?.Invoke(); } catch { }
     }
 
+    private static readonly Regex AnsiEscapeRegex = new("\x1B\\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
+
     private void LogServerLine(string stream, string? line)
     {
         if (string.IsNullOrWhiteSpace(line))
             return;
 
+        var clean = AnsiEscapeRegex.Replace(line.Trim(), "");
+        if (clean.Length == 0)
+            return;
+
         lock (_gate)
         {
-            _serverTail.Add($"{stream}: {line.Trim()}");
+            _serverTail.Add($"{stream}: {clean}");
             if (_serverTail.Count > 12)
                 _serverTail.RemoveAt(0);
         }
 
-        if (line.Contains("server listening", StringComparison.OrdinalIgnoreCase))
-            _log.Info("Private OpenCode server: " + line.Trim());
+        if (clean.Contains("server listening", StringComparison.OrdinalIgnoreCase))
+            _log.Info("Private OpenCode server: " + clean);
         else
-            _log.Debug($"OpenCode server {stream}: {line.Trim()}");
+            _log.Debug($"OpenCode server {stream}: {clean}");
     }
 
     /// <summary>The last server output lines, shown when the server fails to start.</summary>
@@ -626,6 +634,33 @@ public sealed class OpenCodeLauncher : IDisposable
     {
         lock (_gate)
             return string.Join("\n", _serverTail);
+    }
+
+    /// <summary>
+    /// Turns known private-server failures into concrete fix steps. "Database is not
+    /// empty and has no session table" means OpenCode's local database does not match
+    /// the installed CLI version — usually an older CLI (often a custom npm prefix)
+    /// reading a database created by a newer one.
+    /// </summary>
+    private static string BuildServerFailureAdvice(string tail)
+    {
+        if (tail.IndexOf("has no session table", StringComparison.OrdinalIgnoreCase) < 0)
+            return "";
+
+        var dbPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".local", "share", "opencode", "opencode.db");
+
+        return "This database error means OpenCode's local database does not match the installed " +
+               "OpenCode version (an older CLI reading a database made by a newer one, or a corrupt file).\n\n" +
+               "Fix, in order:\n" +
+               "1. Update OpenCode in the same place it is installed from:\n" +
+               "    npm install -g --allow-scripts=opencode-ai opencode-ai\n" +
+               "   Then click Launch OpenCode again — updating alone fixes version skew.\n" +
+               "2. Still failing? Close every OpenCode window first (they hold the database open), " +
+               "then rename the database so a fresh one is created. Warning: this resets session " +
+               "history and stored provider logins:\n" +
+               "    ren \"" + dbPath + "\" \"opencode.db.bak\"";
     }
 
     private void LogServerExit(Process process)
