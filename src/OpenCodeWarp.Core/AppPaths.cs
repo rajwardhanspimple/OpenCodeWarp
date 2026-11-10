@@ -30,5 +30,8 @@ public static class AppPaths
     {
         Directory.CreateDirectory(Root);
         Directory.CreateDirectory(LogDirectory);
+        // The default project folder must exist before anything (launcher, probe)
+        // uses it as a working directory.
+        Directory.CreateDirectory(DefaultWorkspace);
     }
 }

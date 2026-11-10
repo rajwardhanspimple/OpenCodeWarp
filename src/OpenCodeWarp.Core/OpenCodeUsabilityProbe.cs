@@ -78,6 +78,21 @@ public sealed class OpenCodeUsabilityProbe
         if (executable is null)
             return UsabilityProbeResult.Skipped("the OpenCode CLI was not found");
 
+        // The probe runs with the project folder as its working directory; create it if
+        // it does not exist yet (a user who only ran OpenCode externally never created it,
+        // and starting a process into a missing directory fails with "The directory name
+        // is invalid").
+        try
+        {
+            Directory.CreateDirectory(_settings.ProjectFolder);
+        }
+        catch (Exception ex)
+        {
+            return new UsabilityProbeResult(false, false,
+                $"the probe working directory could not be created ({_settings.ProjectFolder}): {ex.Message}",
+                TimeSpan.Zero);
+        }
+
         var stopwatch = Stopwatch.StartNew();
         // One fixed archived session is reused for every probe, so probing never
         // accumulates sessions in OpenCode's store. The id must start with "ses_" —
