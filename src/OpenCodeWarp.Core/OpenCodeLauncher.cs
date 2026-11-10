@@ -652,6 +652,8 @@ public sealed class OpenCodeLauncher : IDisposable
                 return "";
             var tail = string.Join("\n", lines.TakeLast(12));
             var advice = BuildServerFailureAdvice(tail);
+            if (advice.Length == 0 && LooksLikeHelpDump(lines))
+                advice = BuildOutdatedCliAdvice();
             return advice.Length > 0 ? tail + "\n\n" + advice : tail;
         }
         catch
@@ -659,6 +661,23 @@ public sealed class OpenCodeLauncher : IDisposable
             return "";
         }
     }
+
+    /// <summary>
+    /// When the CLI does not recognize a launch option it prints its help text and
+    /// exits — the dashboard then sees several flag-description lines in the output.
+    /// </summary>
+    private static bool LooksLikeHelpDump(string[] lines)
+        => lines.Count(l => l.TrimStart().StartsWith("--", StringComparison.Ordinal)) >= 4
+           || lines.Any(l => l.Contains("model to use in the format of provider/model", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>Advice for a CLI that rejected the launch options: a version mismatch.</summary>
+    private static string BuildOutdatedCliAdvice()
+        => "This help text means your OpenCode CLI does not recognize the options this dashboard " +
+           "passes — it is a different (older) version.\n\n" +
+           "Update OpenCode where it is installed from, then click Launch OpenCode again:\n" +
+           "    npm install -g --allow-scripts=opencode-ai opencode-ai\n" +
+           "(run it with the same Node/npm installation your OpenCode came from — here that " +
+           "looks like a custom npm prefix, so update from that same terminal.)";
 
     private static readonly Regex AnsiEscapeRegex = new("\x1B\\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
 
