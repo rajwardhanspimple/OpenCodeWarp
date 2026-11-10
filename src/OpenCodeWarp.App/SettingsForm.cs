@@ -12,6 +12,7 @@ internal sealed class SettingsForm : Form
     private TextBox _folderBox = null!;
     private TextBox _argsBox = null!;
     private CheckBox _autoLaunch = null!;
+    private CheckBox _serviceProxy = null!;
     private CheckBox _rateRotate = null!;
     private CheckBox _usageRotate = null!;
     private TextBox _autoRotateMinutes = null!;
@@ -199,6 +200,9 @@ internal sealed class SettingsForm : Form
         var folder = PathField(_folderBox, BrowseFolder);
 
         _autoLaunch = Check("Launch OpenCode automatically when the relay starts", _draft.AutoLaunchOpenCode);
+        _serviceProxy = Check(
+            "Route the opencode background service (opencode api, e.g. the opencode-proxy bridge) through the relay",
+            _draft.ServiceProxyEnabled);
         _rateRotate = Check("Rotate on HTTP 429 / rate-limit errors", _draft.RotateOnRateLimit);
         _usageRotate = Check("Rotate on free usage limit errors", _draft.RotateOnUsageLimit);
 
@@ -208,12 +212,20 @@ internal sealed class SettingsForm : Form
             "without restarting OpenCode or changing models. After every rotation the free DeepSeek model is " +
             "probed through the new IP; a burned IP is rotated away automatically.");
 
+        var serviceHint = Hint(
+            "Writes the relay proxy into opencode's service config (opencode service set env), so every future " +
+            "background-service start uses WARP — including opencode api calls from the opencode-proxy bridge. " +
+            "A service that is already running is restarted (with your consent) to pick it up. While the dashboard " +
+            "is closed, that path has no relay to connect through.");
+
         var body = NewBody();
         AddField(body, "OpenCode executable  (empty = auto-detect)", executable);
         AddField(body, "Project folder", folder);
         AddField(body, "Extra OpenCode arguments  (optional)", _argsBox);
         AddFull(body, hint);
         AddFull(body, _autoLaunch);
+        AddFull(body, _serviceProxy);
+        AddFull(body, serviceHint);
         AddFull(body, _usageRotate);
         AddFull(body, _rateRotate);
 
@@ -436,6 +448,7 @@ internal sealed class SettingsForm : Form
         _draft.ProjectFolder = folder;
         _draft.OpenCodeExtraArgs = _argsBox.Text.Trim();
         _draft.AutoLaunchOpenCode = _autoLaunch.Checked;
+        _draft.ServiceProxyEnabled = _serviceProxy.Checked;
         _draft.RotateOnRateLimit = _rateRotate.Checked;
         _draft.RotateOnUsageLimit = _usageRotate.Checked;
         _draft.AutoRotateMinutes = autoRotate;

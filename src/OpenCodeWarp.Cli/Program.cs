@@ -36,6 +36,7 @@ internal static class Program
                 "test-watcher" => await TestWatcherAsync(options),
                 "hosts" => Hosts(options),
                 "classify" => Classify(options),
+                "service" => await ServiceAsync(options, args),
                 "run" => await RunAsync(options, launchOpenCode: true),
                 "watch" => await RunAsync(options, launchOpenCode: false),
                 _ => Unknown(command)
@@ -106,12 +107,74 @@ internal static class Program
 
         var launcher = new OpenCodeLauncher(settings, log);
         Console.WriteLine($"OpenCode CLI : {launcher.DiscoverExecutable() ?? "NOT FOUND"}");
+
+        var serviceState = await new OpenCodeServiceManager(settings, log, launcher).RefreshStateAsync();
+        Console.WriteLine("Background service (opencode api path): " + DescribeService(serviceState));
+
         Console.WriteLine($"AI host rules: {new AiHostCatalog(settings, log).Count}");
         Console.WriteLine($"Relay port   : {settings.RelayPort} {(IsPortFree(settings.RelayPort) ? "(free)" : "(in use)")}");
         Console.WriteLine();
         Console.WriteLine("Search/web fetch hosts such as mcp.exa.ai are direct in AI-only mode; model calls use WARP.");
         return 0;
     }
+
+    private static string DescribeService(OpenCodeServiceState? state)
+    {
+        if (state is null)
+            return "unknown (check failed)";
+        if (!state.Running)
+            return state.Managed
+                ? "not running (starts on first opencode api use)"
+                : "not running (routing is off)";
+        var suffix = state.RestartNeeded
+            ? " — RESTART NEEDED to pick up the relay proxy"
+            : state.EnvConfigured ? " — relay-wired" : " — env config incomplete";
+        return $"{state.Url} (pid {state.Pid}){suffix}";
+    }
+
+    private static async Task<int> ServiceAsync(CliOptions options, string[] args)
+    {
+        var sub = args.SkipWhile(a => !string.Equals(a, "service", StringComparison.Ordinal))
+            .Skip(1)
+            .FirstOrDefault(a => !a.StartsWith("-", StringComparison.Ordinal)) ?? "status";
+
+        var settings = LoadSettings(options);
+        var log = CreateLog(settings, echo: true, options.Has("verbose"));
+        var launcher = new OpenCodeLauncher(settings, log);
+        var manager = new OpenCodeServiceManager(settings, log, launcher);
+
+        if (sub is "status")
+        {
+            PrintService(DescribeService(await manager.RefreshStateAsync()));
+            return 0;
+        }
+
+        if (sub is not "ensure")
+        {
+            Console.WriteLine($"Unknown service subcommand: {sub}. Use 'ocwarp service [status|ensure]'.");
+            return 2;
+        }
+
+        var state = await manager.EnsureProxyConfigAsync($"http://127.0.0.1:{settings.RelayPort}");
+        PrintService(DescribeService(state));
+        if (state is { Running: true, RestartNeeded: true })
+        {
+            if (options.Has("restart"))
+            {
+                Console.WriteLine("Restarting the opencode background service...");
+                var restarted = await manager.RestartAsync();
+                PrintService(DescribeService(await manager.RefreshStateAsync()));
+                return restarted ? 0 : 1;
+            }
+
+            Console.WriteLine("The running service predates the env config; re-run with --restart to restart it now.");
+            return 1;
+        }
+
+        return 0;
+    }
+
+    private static void PrintService(string line) => Console.WriteLine("opencode background service: " + line);
 
     private static async Task<int> TraceAsync(CliOptions options)
     {
@@ -480,6 +543,7 @@ OpenCode Warp Relay CLI {Version}
   ocwarp split-test          Verify AI traffic uses WARP and search/fetch stays direct.
   ocwarp test-watcher        Test free-limit detection without touching OpenCode.
   ocwarp hosts               Show AI host rules and routing decisions.
+  ocwarp service [ensure]    Check (or write) the background service relay env; --restart applies it live.
   ocwarp classify --line "..."  Classify a log line as usage/rate limit.
   ocwarp run [--folder DIR]  Start relay + WARP + OpenCode (no GUI).
   ocwarp watch               Start relay + WARP + quota watcher (no GUI, no OpenCode).

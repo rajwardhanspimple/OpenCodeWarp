@@ -38,6 +38,24 @@ internal static class WindowsPortFinder
         return ports;
     }
 
+    /// <summary>
+    /// Owner PID of a loopback TCP listener on the given port, or null. Used to identify
+    /// the process behind a URL reported by <c>opencode service status</c>.
+    /// </summary>
+    public static int? GetLoopbackListenerOwnerPid(int port)
+    {
+        foreach (var row in EnumerateTcpListeners())
+        {
+            if (row.LocalAddress != Loopback && row.LocalAddress != AnyAddress)
+                continue;
+            var localPort = (ushort)IPAddress.NetworkToHostOrder((short)(row.LocalPort & 0xFFFF));
+            if (localPort == port && row.OwningPid > 0)
+                return (int)row.OwningPid;
+        }
+
+        return null;
+    }
+
     private static HashSet<int> GetDescendantProcessIds(int rootPid)
     {
         var parents = new Dictionary<int, int>();

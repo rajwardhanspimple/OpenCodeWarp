@@ -13,6 +13,7 @@ The app is self-contained in its own folder. It does not modify OpenCode's insta
 - **OpenCode is not killed or restarted on a connection reset.** The watcher detects `ECONNRESET`, reconnects WARP, and probes the OpenCode endpoint. It does not switch models.
 - **Usage limits trigger a WARP IP rotation by default.** The dashboard rotates to a fresh exit IP when OpenCode reports the free usage limit (turn this off in Settings if your provider enforces the quota on the account).
 - **One stable proxy endpoint.** OpenCode always uses `http://127.0.0.1:41000`. WARP's real proxy port (`127.0.0.1:40000`) changes underneath, so OpenCode never needs a new environment or a restart.
+- **The opencode background service is relay-wired too.** `opencode api` clients — for example the [opencode-proxy](D:\opencode-proxy) bridge that serves DeepSeek Harness — send their model traffic through opencode's background service. The dashboard writes the relay proxy into that service's env config (`opencode service set env`), so every future service start uses the rotating WARP exit IP as well, and the quota watcher rotates on its usage-limit errors like it does for the TUI.
 
 ## How rotation and recovery work
 
@@ -137,6 +138,7 @@ Stored at `%LOCALAPPDATA%\OpenCodeWarp\settings.json`.
 | Scope | `AiOnly` | AI hosts through WARP; search/fetch direct. `All` sends everything except the direct list through WARP. |
 | Relay port | `41000` | Stable loopback proxy used by OpenCode. |
 | WARP proxy port | `40000` | Local WARP proxy port. |
+| Route the opencode background service through the relay | on | Writes `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` into opencode's service env config (`opencode service get` shows it) so the `opencode api` path — the opencode-proxy bridge and any other API client — also exits via WARP. Turning it off removes exactly those keys. |
 | Rotate on usage limit | on | Rotate WARP when the log reports the free usage limit. |
 | Rotate on rate limit | off | Also rotate on HTTP 429 / rate-limit errors. |
 | Auto-rotate WARP every | `30` | Minutes between scheduled rotations; `0` disables the timer. |
@@ -149,15 +151,39 @@ Stored at `%LOCALAPPDATA%\OpenCodeWarp\settings.json`.
 
 Extra AI provider hosts can be added in Settings (for example a custom `baseURL` host). AI hosts are also discovered automatically from `opencode.json` `baseURL` entries.
 
+### The opencode background service (opencode api / opencode-proxy)
+
+`opencode api` — and the [opencode-proxy](D:\opencode-proxy) shim built on it, which serves
+DeepSeek Harness and other OpenAI-compatible clients — sends model traffic through opencode's
+**background service** (`opencode serve --service`). That process makes the upstream calls, so
+it needs the relay environment, not the client.
+
+The dashboard writes `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` (with the lowercase variants)
+into opencode's persisted service config (`opencode service set env`), so **every** future
+service start uses the relay — whether opencode itself starts it after a reboot, a terminal
+triggers it, or the bridge is the first client of the day. `opencode service get` shows the
+config; the dashboard only writes keys that are missing or wrong and never removes foreign keys.
+
+- If the service is **already running** when the config changes, it keeps its old environment.
+  The dashboard asks once and restarts it for you (in-flight `opencode api` requests are
+  dropped); `ocwarp service ensure --restart` does the same headlessly.
+- Usage-limit errors from this path land in the same OpenCode log the quota watcher tails, so
+  the rotating-IP recovery works identically — no extra configuration.
+- **Keep the dashboard running** (closing the window keeps the relay in the tray). When the
+  relay is down, this path has no proxy to connect through. Turning the setting off removes
+  the keys again; the running service needs one more restart to drop them.
+
 ## CLI (`ocwarp.exe`)
 
 ```powershell
-ocwarp status        # WARP, direct egress, WARP egress, OpenCode discovery
+ocwarp status        # WARP, direct egress, WARP egress, OpenCode discovery, background service
 ocwarp trace         # direct vs WARP exit IP
 ocwarp rotate        # rotate WARP without touching OpenCode
 ocwarp split-test    # verify AI -> WARP, search -> direct, web fetch works
 ocwarp selftest      # full relay smoke test
 ocwarp hosts         # show AI host rules and sample routing decisions
+ocwarp service       # show the opencode background service state
+ocwarp service ensure [--restart]   # write the relay env config; --restart applies it to a running service
 ocwarp run           # headless relay + launch OpenCode
 ocwarp watch         # headless relay only
 ocwarp proxy         # relay only, foreground

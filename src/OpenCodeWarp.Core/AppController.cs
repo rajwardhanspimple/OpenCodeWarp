@@ -3,6 +3,9 @@ namespace OpenCodeWarp;
 /// <summary>Everything the UI needs to ask the user before an automatic IP change.</summary>
 public sealed record RotationPrompt(string Reason, string CurrentIp);
 
+/// <summary>Asks the user before restarting the opencode background service for its new proxy env.</summary>
+public sealed record ServiceRestartPrompt(string Url, int? Pid);
+
 public sealed class AppController : IAsyncDisposable
 {
     private readonly SemaphoreSlim _rotationGate = new(1, 1);
@@ -27,6 +30,7 @@ public sealed class AppController : IAsyncDisposable
     public WarpClient Warp { get; }
     public OpenCodeLauncher OpenCode { get; }
     public OpenCodeUsabilityProbe Probe { get; }
+    public OpenCodeServiceManager Service { get; }
     public QuotaWatcher Watcher { get; }
 
     public bool IsStarted => _started;
@@ -47,6 +51,9 @@ public sealed class AppController : IAsyncDisposable
 
     /// <summary>Outcome of the last DeepSeek-free-model usability probe; null when none ran yet.</summary>
     public UsabilityProbeResult? LastProbe { get; private set; }
+
+    /// <summary>Latest known state of the opencode background service; null before the first check.</summary>
+    public OpenCodeServiceState? LastServiceState => Service.CurrentState;
     public string? LastError { get; private set; }
     public bool WarpOnline => LastTrace?.WarpOn == true;
     public bool OpenCodeRunning => OpenCode.IsRunning;
@@ -70,6 +77,14 @@ public sealed class AppController : IAsyncDisposable
     /// </summary>
     public Func<RotationPrompt, Task<bool>>? ConfirmRotation { get; set; }
 
+    /// <summary>
+    /// Set by the UI. Asked once whenever the background service's proxy env was just
+    /// written while the service is already running: restarting applies the new
+    /// environment but drops in-flight opencode api requests. Without a handler
+    /// (headless CLI use) the restart proceeds.
+    /// </summary>
+    public Func<ServiceRestartPrompt, Task<bool>>? ConfirmServiceRestart { get; set; }
+
     public AppController(AppSettings settings, AppLog log)
     {
         Settings = settings;
@@ -80,6 +95,7 @@ public sealed class AppController : IAsyncDisposable
         Warp = new WarpClient(settings, log);
         OpenCode = new OpenCodeLauncher(settings, log);
         Probe = new OpenCodeUsabilityProbe(settings, OpenCode, log);
+        Service = new OpenCodeServiceManager(settings, log, OpenCode);
         Watcher = new QuotaWatcher(settings, log, HandleQuotaAsync);
 
         Relay.StatsChanged += RaiseStateChanged;
@@ -113,6 +129,10 @@ public sealed class AppController : IAsyncDisposable
             Log.Warn("WARP is not ready yet. The relay is listening, but OpenCode will not be launched " +
                      "until WARP reports warp=on.");
         }
+
+        // Wire the opencode background service (the opencode api path used by the
+        // opencode-proxy bridge and other API clients) before anything can use it.
+        await EnsureServiceAsync(cancellationToken);
 
         Watcher.Start();
         _healthLoop = Task.Run(() => HealthLoopAsync(_lifetime.Token));
@@ -432,6 +452,88 @@ public sealed class AppController : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Applies the relay proxy to the opencode background service env config. Writes only
+    /// what is missing or stale; when a service that is already running predates the
+    /// write, the user is asked before it is restarted. Failures are logged, never fatal:
+    /// the TUI path keeps working without the service.
+    /// </summary>
+    private async Task EnsureServiceAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!Settings.ServiceProxyEnabled)
+            {
+                await Service.RefreshStateAsync(cancellationToken);
+                return;
+            }
+
+            var state = await Service.EnsureProxyConfigAsync(ProxyUrl, cancellationToken);
+            if (state is { Running: true, RestartNeeded: true })
+            {
+                if (await ConfirmServiceRestartAsync(state, cancellationToken))
+                {
+                    await Service.RestartAsync(cancellationToken);
+                    state = await Service.RefreshStateAsync(cancellationToken);
+                }
+                else
+                {
+                    Log.Warn("The opencode background service was not restarted, so it keeps its old " +
+                             "environment: opencode api clients (e.g. the opencode-proxy bridge) do not " +
+                             "use the relay until the service is restarted.");
+                }
+            }
+
+            if (state is { Running: true })
+                Log.Info($"opencode background service: {state.Url} (pid {state.Pid}) — " +
+                         (state.EnvConfigured ? "relay-wired." : "env config incomplete."));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"opencode background service routing could not be applied: {ex.Message}");
+        }
+        finally
+        {
+            RaiseStateChanged();
+        }
+    }
+
+    /// <summary>Same one-dialog-at-a-time rule as rotation confirmations.</summary>
+    private async Task<bool> ConfirmServiceRestartAsync(OpenCodeServiceState state, CancellationToken cancellationToken)
+    {
+        var handler = ConfirmServiceRestart;
+        if (handler is null)
+            return true;
+
+        if (Interlocked.CompareExchange(ref _confirmInFlight, 1, 0) != 0)
+        {
+            Log.Info("A confirmation dialog is already open; the background service restart is skipped " +
+                     "instead of stacking a second dialog.");
+            return false;
+        }
+
+        try
+        {
+            var allowed = await handler(new ServiceRestartPrompt(state.Url ?? "", state.Pid));
+            if (!allowed)
+                Log.Warn("Background service restart declined by the user.");
+            return allowed;
+        }
+        catch (OperationCanceledException)
+        {
+            return false;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn($"The service restart confirmation could not be shown ({ex.Message}); not restarting.");
+            return false;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _confirmInFlight, 0);
+        }
+    }
+
     private void OnWarpTunnelFailed(WarpTunnelFailure failure)
     {
         if (IsRotating || IsRecovering)
@@ -689,6 +791,24 @@ public sealed class AppController : IAsyncDisposable
             });
         }
 
+        // Re-apply the background service env after a save: a relay port change makes the
+        // persisted env stale, and a toggled-off feature must remove exactly our keys.
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                if (Settings.ServiceProxyEnabled)
+                    await EnsureServiceAsync(CancellationToken.None);
+                else
+                    await Service.RemoveProxyConfigAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                Log.Warn($"opencode background service env update after settings change failed: {ex.Message}");
+            }
+            RaiseStateChanged();
+        });
+
         Log.Debug("Settings saved.");
         RaiseStateChanged();
     }
@@ -725,6 +845,9 @@ public sealed class AppController : IAsyncDisposable
                 if (IsRotating || IsRecovering || !Relay.IsRunning)
                     continue;
 
+                // Best-effort: keep the background service state current for the dashboard.
+                try { await Service.RefreshStateAsync(cancellationToken); }
+                catch { }
                 var trace = await Warp.TraceAsync(cancellationToken);
                 if (trace.WarpOn)
                 {

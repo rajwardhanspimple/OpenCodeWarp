@@ -680,6 +680,7 @@ internal sealed class MainForm : Form
         _log.EntryWritten += entry => PostToUi(() => AppendLogEntry(entry));
         _controller.StateChanged += () => PostToUi(RefreshUi);
         _controller.ConfirmRotation = ConfirmRotationOnUiAsync;
+        _controller.ConfirmServiceRestart = ConfirmServiceRestartOnUiAsync;
 
         _controller.QuotaDetected += hit => PostToUi(() =>
         {
@@ -866,11 +867,12 @@ internal sealed class MainForm : Form
             _openCodeCard.Value.Text = running && _controller.OpenCode.ProcessId is int pid
                 ? $"PID {pid}"
                 : _launching ? "Starting…" : externalOpenCode ? "Outside app" : "Not running";
-            _openCodeCard.Detail.Text = running
+            var serviceLine = DescribeBackgroundService();
+            _openCodeCard.Detail.Text = (running
                 ? $"{FormatUptime(_controller.OpenCode.StartedAt)} · process-only proxy"
                 : externalOpenCode
                     ? $"{_externalOpenCodeCount} process(es) outside this dashboard\nLaunch here to use the relay"
-                    : "Launch from here to use the relay";
+                    : "Launch from here to use the relay") + "\n" + serviceLine;
 
             var quotaMode = "AUTO CHECK";
             _rotationCard.Pill.SetStatus(rotating ? "ROTATING" : quotaMode,
@@ -1450,6 +1452,72 @@ internal sealed class MainForm : Form
     /// window that is minimized to the tray. The controller allows only one
     /// confirmation at a time, so dialogs cannot stack.
     /// </summary>
+    private string DescribeBackgroundService()
+    {
+        var service = _controller.LastServiceState;
+        if (service is null)
+            return "background service: checking…";
+        if (!service.Running)
+            return service.Managed
+                ? "background service: not running (starts on first opencode api use)"
+                : "background service: not running";
+        if (service.RestartNeeded)
+            return $"background service: {service.Url} — restart needed to pick up the relay proxy";
+        return service.EnvConfigured
+            ? $"background service: {service.Url} — relay-wired"
+            : $"background service: {service.Url} — env config incomplete";
+    }
+
+    private Task<bool> ConfirmServiceRestartOnUiAsync(ServiceRestartPrompt prompt)
+    {
+        var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Action ask = () =>
+        {
+            try
+            {
+                using var owner = new Form
+                {
+                    TopMost = true,
+                    ShowInTaskbar = false,
+                    FormBorderStyle = FormBorderStyle.None,
+                    StartPosition = FormStartPosition.Manual,
+                    Location = new Point(-3000, -3000),
+                    Size = new Size(1, 1)
+                };
+                owner.Show();
+
+                var text = $"The opencode background service ({prompt.Url}" +
+                           (prompt.Pid is int pid ? $", pid {pid}" : "") + ") is already running, " +
+                           "but its proxy environment was just updated.\n\n" +
+                           "Restart it now so model traffic from opencode api clients " +
+                           "(the opencode-proxy bridge and other API tools) uses the WARP relay?\n" +
+                           "(In-flight opencode api requests are dropped. " +
+                           "Declining leaves the service on its old environment.)";
+                var choice = MessageBox.Show(owner, text, "Restart opencode background service?",
+                    MessageBoxButtons.YesNo, MessageBoxIcon.Question,
+                    MessageBoxDefaultButton.Button2);
+                completion.TrySetResult(choice == DialogResult.Yes);
+            }
+            catch (Exception ex)
+            {
+                completion.TrySetException(ex);
+            }
+        };
+
+        if (IsDisposed || Disposing || !IsHandleCreated)
+        {
+            // No window to ask in; never restart the service without consent.
+            completion.TrySetResult(false);
+            return completion.Task;
+        }
+
+        if (InvokeRequired)
+            BeginInvoke(ask);
+        else
+            ask();
+        return completion.Task;
+    }
+
     private Task<bool> ConfirmRotationOnUiAsync(RotationPrompt prompt)
     {
         var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

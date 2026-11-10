@@ -40,6 +40,13 @@ public sealed class AppSettings
 
     public bool AutoLaunchOpenCode { get; set; }
 
+    /// <summary>
+    /// Persist the relay proxy into opencode's background-service environment config
+    /// (<c>opencode service set env</c>), so the <c>opencode api</c> path — used by the
+    /// opencode-proxy bridge and other API clients — also exits through WARP.
+    /// </summary>
+    public bool ServiceProxyEnabled { get; set; } = true;
+
     public bool MinimizeToTray { get; set; } = true;
     public bool StartMinimized { get; set; }
     public bool StartWithWindows { get; set; }

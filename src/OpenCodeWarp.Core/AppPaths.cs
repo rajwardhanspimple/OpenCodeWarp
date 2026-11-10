@@ -7,6 +7,7 @@ public static class AppPaths
         "OpenCodeWarp");
 
     public static string SettingsFile => Path.Combine(Root, "settings.json");
+    public static string ServiceStateFile => Path.Combine(Root, "service-state.json");
     public static string LogDirectory => Path.Combine(Root, "logs");
     public static string DefaultWorkspace => Path.Combine(Root, "workspace");
 
