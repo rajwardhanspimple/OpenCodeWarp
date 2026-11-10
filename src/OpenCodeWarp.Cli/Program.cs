@@ -156,21 +156,24 @@ internal static class Program
         }
 
         var state = await manager.EnsureProxyConfigAsync($"http://127.0.0.1:{settings.RelayPort}");
-        PrintService(DescribeService(state));
-        if (state is { Running: true, RestartNeeded: true })
+        if (state is { Running: true, RestartNeeded: true } && options.Has("restart"))
         {
-            if (options.Has("restart"))
-            {
-                Console.WriteLine("Restarting the opencode background service...");
-                var restarted = await manager.RestartAsync();
-                PrintService(DescribeService(await manager.RefreshStateAsync()));
-                return restarted ? 0 : 1;
-            }
-
+            Console.WriteLine("Restarting the opencode background service...");
+            var restarted = await manager.RestartAsync();
+            state = await manager.RefreshStateAsync();
+            PrintService(DescribeService(state));
+            if (!restarted)
+                return 1;
+        }
+        else if (state is { Running: true, RestartNeeded: true })
+        {
+            PrintService(DescribeService(state));
             Console.WriteLine("The running service predates the env config; re-run with --restart to restart it now.");
             return 1;
         }
 
+        state = await manager.EnsureRunningAsync();
+        PrintService(DescribeService(state));
         return 0;
     }
 

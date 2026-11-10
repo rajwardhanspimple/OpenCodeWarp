@@ -484,6 +484,10 @@ public sealed class AppController : IAsyncDisposable
                 }
             }
 
+            // Same guarantee the TUI path gets from Launch OpenCode: the dashboard leaves
+            // the service running (with the env config it just verified), not the user.
+            state = await Service.EnsureRunningAsync(cancellationToken);
+
             if (state is { Running: true })
                 Log.Info($"opencode background service: {state.Url} (pid {state.Pid}) — " +
                          (state.EnvConfigured ? "relay-wired." : "env config incomplete."));

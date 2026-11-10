@@ -167,6 +167,8 @@ config; the dashboard only writes keys that are missing or wrong and never remov
 - If the service is **already running** when the config changes, it keeps its old environment.
   The dashboard asks once and restarts it for you (in-flight `opencode api` requests are
   dropped); `ocwarp service ensure --restart` does the same headlessly.
+- On startup the dashboard also **starts the service if it is not running**, so
+  `opencode api` clients work right away — no manual `opencode service start` needed.
 - Usage-limit errors from this path land in the same OpenCode log the quota watcher tails, so
   the rotating-IP recovery works identically — no extra configuration.
 - **Keep the dashboard running** (closing the window keeps the relay in the tray). When the

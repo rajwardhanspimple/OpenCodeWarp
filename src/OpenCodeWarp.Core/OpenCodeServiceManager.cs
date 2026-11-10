@@ -168,6 +168,40 @@ public sealed partial class OpenCodeServiceManager
         }
     }
 
+    /// <summary>
+    /// Starts the background service when it is not running, so opencode api clients
+    /// (the opencode-proxy bridge, DeepSeek Harness) work without a manual
+    /// <c>opencode service start</c>. The persisted env config — already ensured by
+    /// EnsureProxyConfigAsync — applies to the freshly started daemon. A service that
+    /// is already running is left untouched.
+    /// </summary>
+    public async Task<OpenCodeServiceState?> EnsureRunningAsync(CancellationToken cancellationToken = default)
+    {
+        await _gate.WaitAsync(cancellationToken);
+        try
+        {
+            var running = await GetRunningServiceAsync(cancellationToken);
+            if (running is not null)
+                return await RefreshStateCoreAsync(cancellationToken);
+
+            _log.Info("opencode background service is not running; starting it so opencode api clients work.");
+            await RunServiceCommandAsync("service start", cancellationToken);
+
+            var after = await WaitForRunningAsync(cancellationToken);
+            if (after is null)
+                _log.Warn("The opencode background service did not come back after 'service start'; " +
+                          "opencode api clients will fail until it is running.");
+            else
+                _log.Info($"opencode background service started: {after.Url} (pid {after.Pid}).");
+
+            return await RefreshStateCoreAsync(cancellationToken);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     /// <summary>Removes exactly the keys this manager owns (Settings toggle turned off).</summary>
     public async Task RemoveProxyConfigAsync(CancellationToken cancellationToken = default)
     {
